@@ -85,3 +85,94 @@ class JobResponse(BaseModel):
     package_index: List[PackageDescriptor]
     created_at: str = Field(..., description="Job creation timestamp in ISO 8601 format")
     relay_links: Optional[List[RelayLink]] = Field(None, description="Relay links for manifests")
+
+
+# Provider-side models
+
+class NominationRequest(BaseModel):
+    """Request model for provider to declare NGH availability"""
+    region: Region
+    iso_hour: int = Field(..., ge=0, le=23, description="ISO hour (0-23)")
+    tier: Tier
+    sla: SLA
+    ngh_available: float = Field(..., gt=0, description="NGH available for this window")
+
+
+class NominationResponse(BaseModel):
+    """Response model for nomination"""
+    nomination_id: str = Field(..., description="Unique identifier for the nomination")
+    region: Region
+    iso_hour: int
+    tier: Tier
+    sla: SLA
+    ngh_available: float
+    created_at: str = Field(..., description="Nomination creation timestamp in ISO 8601 format")
+
+
+class LotStatus(str, Enum):
+    """Lot status enumeration"""
+    PENDING = "pending"
+    PREPARING = "preparing"
+    READY = "ready"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class LotCreateRequest(BaseModel):
+    """Request model for creating a lot"""
+    window: Window
+    job_id: Optional[str] = Field(None, description="Optional job ID to associate with this lot")
+
+
+class Lot(BaseModel):
+    """Model for a compute lot"""
+    lot_id: str
+    status: LotStatus
+    job_id: Optional[str] = Field(None, description="Associated job ID if assigned")
+    window: Window
+    created_at: str = Field(..., description="Lot creation timestamp in ISO 8601 format")
+    prepared_at: Optional[str] = Field(None, description="Preparation ready timestamp in ISO 8601 format")
+    completed_at: Optional[str] = Field(None, description="Completion timestamp in ISO 8601 format")
+    # Result fields
+    output_root: Optional[str] = Field(None, description="Root hash or URI of output")
+    item_count: Optional[int] = Field(None, description="Number of items processed")
+    wall_time_seconds: Optional[float] = Field(None, description="Wall clock time in seconds")
+    raw_gpu_time_seconds: Optional[float] = Field(None, description="Raw GPU time in seconds")
+    logs_uri: Optional[str] = Field(None, description="URI to access logs")
+
+
+class PrepareReadyRequest(BaseModel):
+    """Request model for attesting lot readiness"""
+    device_ok: bool = Field(..., description="Device is operational")
+    driver_ok: bool = Field(..., description="Driver is operational")
+    image_pulled: bool = Field(..., description="Container image has been pulled")
+    inputs_prefetched: bool = Field(..., description="Inputs have been prefetched")
+
+
+class PrepareReadyResponse(BaseModel):
+    """Response model for prepare ready"""
+    lot_id: str
+    status: LotStatus
+    prepared_at: str = Field(..., description="Preparation ready timestamp in ISO 8601 format")
+
+
+class ResultRequest(BaseModel):
+    """Request model for submitting lot results"""
+    output_root: str = Field(..., description="Root hash or URI of output")
+    item_count: int = Field(..., ge=0, description="Number of items processed")
+    wall_time_seconds: float = Field(..., gt=0, description="Wall clock time in seconds")
+    raw_gpu_time_seconds: float = Field(..., gt=0, description="Raw GPU time in seconds")
+    logs_uri: Optional[str] = Field(None, description="URI to access logs")
+
+
+class ResultResponse(BaseModel):
+    """Response model for result submission"""
+    lot_id: str
+    status: LotStatus
+    output_root: str
+    item_count: int
+    wall_time_seconds: float
+    raw_gpu_time_seconds: float
+    logs_uri: Optional[str]
+    completed_at: str = Field(..., description="Completion timestamp in ISO 8601 format")

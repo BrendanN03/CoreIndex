@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Build outputs
+*.tsbuildinfo
+.tmp/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -76,3 +80,14 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+
+# Vite
+.vite
+vite.config.*.timestamp-*
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+.cache/
+.temp/

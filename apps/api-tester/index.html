@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Tester - Compute Market Exchange</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: #60a5fa;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 30px;
+        }
+        
+        .api-url {
+            background: #1e293b;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 30px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .api-url input {
+            flex: 1;
+            background: #0f172a;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        
+        .api-url button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .api-url button:hover {
+            background: #2563eb;
+        }
+        
+        .section {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .section h2 {
+            color: #60a5fa;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #cbd5e1;
+            font-size: 0.9em;
+        }
+        
+        input, select, textarea {
+            width: 100%;
+            padding: 8px 12px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            border-radius: 4px;
+            font-family: inherit;
+        }
+        
+        textarea {
+            min-height: 100px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        
+        button:hover {
+            background: #2563eb;
+        }
+        
+        button:disabled {
+            background: #475569;
+            cursor: not-allowed;
+        }
+        
+        .response {
+            margin-top: 15px;
+            padding: 15px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .response pre {
+            color: #10b981;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .error {
+            color: #ef4444;
+        }
+        
+        .success {
+            color: #10b981;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .package-item {
+            background: #0f172a;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            border: 1px solid #334155;
+        }
+        
+        .package-item button {
+            background: #ef4444;
+            padding: 5px 10px;
+            font-size: 0.8em;
+        }
+        
+        .add-package-btn {
+            background: #10b981;
+            margin-top: 10px;
+        }
+        
+        .add-package-btn:hover {
+            background: #059669;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Compute Market Exchange API Tester</h1>
+        <p class="subtitle">Test your backend API endpoints</p>
+        
+        <div class="api-url">
+            <label for="apiBaseUrl">API Base URL:</label>
+            <input type="text" id="apiBaseUrl" value="http://localhost:8000" placeholder="http://localhost:8000">
+            <button onclick="testConnection()">Test Connection</button>
+        </div>
+        
+        <div class="grid">
+            <!-- Buyer Endpoints -->
+            <div class="section">
+                <h2>👤 Buyer: Create Job</h2>
+                <div class="form-group">
+                    <label>Job ID:</label>
+                    <input type="text" id="jobId" value="job-001" placeholder="job-001">
+                </div>
+                <div class="form-group">
+                    <label>Region:</label>
+                    <select id="region">
+                        <option value="us-east">US East</option>
+                        <option value="us-west">US West</option>
+                        <option value="eu-central">EU Central</option>
+                        <option value="asia-pacific">Asia Pacific</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>ISO Hour (0-23):</label>
+                    <input type="number" id="isoHour" value="14" min="0" max="23">
+                </div>
+                <div class="form-group">
+                    <label>SLA:</label>
+                    <select id="sla">
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Tier:</label>
+                    <select id="tier">
+                        <option value="basic">Basic</option>
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="enterprise">Enterprise</option>
+                    </select>
+                </div>
+                <div id="packages">
+                    <h3 style="color: #94a3b8; font-size: 0.9em; margin-bottom: 10px;">Packages:</h3>
+                    <div class="package-item">
+                        <label>Package ID:</label>
+                        <input type="text" class="pkg-id" value="pkg-1" placeholder="pkg-1">
+                        <label>Size (NGH):</label>
+                        <input type="number" class="pkg-size" value="10.5" step="0.1" min="0.1">
+                        <label>First Output (seconds, optional):</label>
+                        <input type="number" class="pkg-output" value="90" min="0">
+                        <button onclick="removePackage(this)">Remove</button>
+                    </div>
+                </div>
+                <button class="add-package-btn" onclick="addPackage()">+ Add Package</button>
+                <button onclick="createJob()" style="margin-top: 15px; width: 100%;">Create Job</button>
+                <div id="createJobResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <div class="section">
+                <h2>📊 Buyer: Check Feasibility</h2>
+                <div class="form-group">
+                    <label>Job ID:</label>
+                    <input type="text" id="feasibilityJobId" value="job-001" placeholder="job-001">
+                </div>
+                <div class="form-group">
+                    <label>Key (optional, for vouchers):</label>
+                    <input type="text" id="voucherKey" placeholder="Leave empty to use job_id">
+                </div>
+                <button onclick="checkFeasibility()" style="width: 100%;">Check Feasibility</button>
+                <div id="feasibilityResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <div class="section">
+                <h2>📋 Buyer: Get Job Status</h2>
+                <div class="form-group">
+                    <label>Job ID:</label>
+                    <input type="text" id="statusJobId" value="job-001" placeholder="job-001">
+                </div>
+                <button onclick="getJobStatus()" style="width: 100%;">Get Status</button>
+                <div id="statusResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <!-- Provider Endpoints -->
+            <div class="section">
+                <h2>🏭 Provider: Create Nomination</h2>
+                <div class="form-group">
+                    <label>Region:</label>
+                    <select id="nomRegion">
+                        <option value="us-east">US East</option>
+                        <option value="us-west">US West</option>
+                        <option value="eu-central">EU Central</option>
+                        <option value="asia-pacific">Asia Pacific</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>ISO Hour (0-23):</label>
+                    <input type="number" id="nomIsoHour" value="14" min="0" max="23">
+                </div>
+                <div class="form-group">
+                    <label>Tier:</label>
+                    <select id="nomTier">
+                        <option value="basic">Basic</option>
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="enterprise">Enterprise</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>SLA:</label>
+                    <select id="nomSla">
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>NGH Available:</label>
+                    <input type="number" id="nghAvailable" value="100.0" step="0.1" min="0.1">
+                </div>
+                <button onclick="createNomination()" style="width: 100%;">Create Nomination</button>
+                <div id="nominationResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <div class="section">
+                <h2>📦 Provider: Create Lot</h2>
+                <div class="form-group">
+                    <label>Region:</label>
+                    <select id="lotRegion">
+                        <option value="us-east">US East</option>
+                        <option value="us-west">US West</option>
+                        <option value="eu-central">EU Central</option>
+                        <option value="asia-pacific">Asia Pacific</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>ISO Hour (0-23):</label>
+                    <input type="number" id="lotIsoHour" value="14" min="0" max="23">
+                </div>
+                <div class="form-group">
+                    <label>SLA:</label>
+                    <select id="lotSla">
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Tier:</label>
+                    <select id="lotTier">
+                        <option value="basic">Basic</option>
+                        <option value="standard">Standard</option>
+                        <option value="premium">Premium</option>
+                        <option value="enterprise">Enterprise</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Job ID (optional):</label>
+                    <input type="text" id="lotJobId" placeholder="job-001 (optional)">
+                </div>
+                <button onclick="createLot()" style="width: 100%;">Create Lot</button>
+                <div id="createLotResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <div class="section">
+                <h2>✅ Provider: Attest Prepare Ready</h2>
+                <div class="form-group">
+                    <label>Lot ID:</label>
+                    <input type="text" id="lotId" placeholder="lot-id-here">
+                    <small style="color: #94a3b8; display: block; margin-top: 5px;">Create a lot first using the "Create Lot" endpoint above</small>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="deviceOk" checked> Device OK
+                    </label>
+                    <label>
+                        <input type="checkbox" id="driverOk" checked> Driver OK
+                    </label>
+                    <label>
+                        <input type="checkbox" id="imagePulled" checked> Image Pulled
+                    </label>
+                    <label>
+                        <input type="checkbox" id="inputsPrefetched" checked> Inputs Prefetched
+                    </label>
+                </div>
+                <button onclick="attestPrepareReady()" style="width: 100%;">Attest Ready</button>
+                <div id="prepareReadyResponse" class="response" style="display: none;"></div>
+            </div>
+            
+            <div class="section">
+                <h2>📤 Provider: Submit Result</h2>
+                <div class="form-group">
+                    <label>Lot ID:</label>
+                    <input type="text" id="resultLotId" placeholder="lot-id-here">
+                </div>
+                <div class="form-group">
+                    <label>Output Root:</label>
+                    <input type="text" id="outputRoot" placeholder="hash://... or URI">
+                </div>
+                <div class="form-group">
+                    <label>Item Count:</label>
+                    <input type="number" id="itemCount" value="100" min="0">
+                </div>
+                <div class="form-group">
+                    <label>Wall Time (seconds):</label>
+                    <input type="number" id="wallTime" value="3600" step="0.1" min="0.1">
+                </div>
+                <div class="form-group">
+                    <label>Raw GPU Time (seconds):</label>
+                    <input type="number" id="rawGpuTime" value="3000" step="0.1" min="0.1">
+                </div>
+                <div class="form-group">
+                    <label>Logs URI (optional):</label>
+                    <input type="text" id="logsUri" placeholder="https://...">
+                </div>
+                <button onclick="submitResult()" style="width: 100%;">Submit Result</button>
+                <div id="resultResponse" class="response" style="display: none;"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = () => document.getElementById('apiBaseUrl').value;
+        
+        async function apiCall(method, endpoint, body = null) {
+            try {
+                const options = {
+                    method,
+                    headers: { 'Content-Type': 'application/json' }
+                };
+                if (body) options.body = JSON.stringify(body);
+                
+                const response = await fetch(`${API_BASE()}${endpoint}`, options);
+                const data = await response.json();
+                return { ok: response.ok, status: response.status, data };
+            } catch (error) {
+                return { ok: false, error: error.message };
+            }
+        }
+        
+        function showResponse(elementId, result) {
+            const el = document.getElementById(elementId);
+            el.style.display = 'block';
+            if (result.ok) {
+                el.innerHTML = `<pre class="success">${JSON.stringify(result.data, null, 2)}</pre>`;
+            } else {
+                el.innerHTML = `<pre class="error">Error ${result.status || ''}: ${JSON.stringify(result.data || result.error, null, 2)}</pre>`;
+            }
+        }
+        
+        async function testConnection() {
+            const result = await apiCall('GET', '/');
+            if (result.ok) {
+                alert('✅ Connection successful!');
+            } else {
+                alert('❌ Connection failed. Make sure the server is running.');
+            }
+        }
+        
+        async function createJob() {
+            const packages = Array.from(document.querySelectorAll('.package-item')).map(item => ({
+                package_id: item.querySelector('.pkg-id').value,
+                size_estimate_ngh: parseFloat(item.querySelector('.pkg-size').value),
+                first_output_estimate_seconds: parseInt(item.querySelector('.pkg-output').value) || null
+            }));
+            
+            const body = {
+                job_id: document.getElementById('jobId').value,
+                window: {
+                    region: document.getElementById('region').value,
+                    iso_hour: parseInt(document.getElementById('isoHour').value),
+                    sla: document.getElementById('sla').value,
+                    tier: document.getElementById('tier').value
+                },
+                package_index: packages
+            };
+            
+            const result = await apiCall('POST', '/jobs', body);
+            showResponse('createJobResponse', result);
+        }
+        
+        async function checkFeasibility() {
+            const jobId = document.getElementById('feasibilityJobId').value;
+            const key = document.getElementById('voucherKey').value;
+            const endpoint = key ? `/jobs/${jobId}/feasibility?key=${key}` : `/jobs/${jobId}/feasibility`;
+            
+            const result = await apiCall('GET', endpoint);
+            showResponse('feasibilityResponse', result);
+        }
+        
+        async function getJobStatus() {
+            const jobId = document.getElementById('statusJobId').value;
+            const result = await apiCall('GET', `/jobs/${jobId}`);
+            showResponse('statusResponse', result);
+        }
+        
+        async function createNomination() {
+            const body = {
+                region: document.getElementById('nomRegion').value,
+                iso_hour: parseInt(document.getElementById('nomIsoHour').value),
+                tier: document.getElementById('nomTier').value,
+                sla: document.getElementById('nomSla').value,
+                ngh_available: parseFloat(document.getElementById('nghAvailable').value)
+            };
+            
+            const result = await apiCall('POST', '/nominations', body);
+            showResponse('nominationResponse', result);
+        }
+        
+        async function createLot() {
+            const body = {
+                window: {
+                    region: document.getElementById('lotRegion').value,
+                    iso_hour: parseInt(document.getElementById('lotIsoHour').value),
+                    sla: document.getElementById('lotSla').value,
+                    tier: document.getElementById('lotTier').value
+                }
+            };
+            
+            const jobId = document.getElementById('lotJobId').value.trim();
+            if (jobId) {
+                body.job_id = jobId;
+            }
+            
+            const result = await apiCall('POST', '/lots', body);
+            showResponse('createLotResponse', result);
+            
+            // Auto-fill lot ID fields if creation was successful
+            if (result.ok && result.data.lot_id) {
+                document.getElementById('lotId').value = result.data.lot_id;
+                document.getElementById('resultLotId').value = result.data.lot_id;
+            }
+        }
+        
+        async function attestPrepareReady() {
+            const lotId = document.getElementById('lotId').value;
+            const body = {
+                device_ok: document.getElementById('deviceOk').checked,
+                driver_ok: document.getElementById('driverOk').checked,
+                image_pulled: document.getElementById('imagePulled').checked,
+                inputs_prefetched: document.getElementById('inputsPrefetched').checked
+            };
+            
+            const result = await apiCall('POST', `/lots/${lotId}/prepare_ready`, body);
+            showResponse('prepareReadyResponse', result);
+        }
+        
+        async function submitResult() {
+            const lotId = document.getElementById('resultLotId').value;
+            const body = {
+                output_root: document.getElementById('outputRoot').value,
+                item_count: parseInt(document.getElementById('itemCount').value),
+                wall_time_seconds: parseFloat(document.getElementById('wallTime').value),
+                raw_gpu_time_seconds: parseFloat(document.getElementById('rawGpuTime').value),
+                logs_uri: document.getElementById('logsUri').value || null
+            };
+            
+            const result = await apiCall('POST', `/lots/${lotId}/result`, body);
+            showResponse('resultResponse', result);
+        }
+        
+        function addPackage() {
+            const packagesDiv = document.getElementById('packages');
+            const newPackage = document.createElement('div');
+            newPackage.className = 'package-item';
+            newPackage.innerHTML = `
+                <label>Package ID:</label>
+                <input type="text" class="pkg-id" value="pkg-${packagesDiv.children.length + 1}" placeholder="pkg-1">
+                <label>Size (NGH):</label>
+                <input type="number" class="pkg-size" value="10.0" step="0.1" min="0.1">
+                <label>First Output (seconds, optional):</label>
+                <input type="number" class="pkg-output" value="90" min="0">
+                <button onclick="removePackage(this)">Remove</button>
+            `;
+            packagesDiv.appendChild(newPackage);
+        }
+        
+        function removePackage(button) {
+            button.parentElement.remove();
+        }
+    </script>
+</body>
+</html>
