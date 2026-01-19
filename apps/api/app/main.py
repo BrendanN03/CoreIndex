@@ -18,6 +18,7 @@ from app.models import (
     LotCreateRequest
 )
 from app.storage import storage
+from app.auth import router as auth_router
 from app.feasibility import (
     calculate_ngh_required,
     calculate_earliest_start,
@@ -39,6 +40,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router, tags=["auth"])
 
 
 @app.get("/")
