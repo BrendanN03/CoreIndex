@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -208,6 +209,8 @@ def _verify_password(password: str, stored: str) -> bool:
 
 
 router = APIRouter()
+bearer_scheme = HTTPBearer(auto_error=False)
+
 
 
 @router.post("/auth/register", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
@@ -279,9 +282,16 @@ def _get_bearer_token(authorization: Optional[str]) -> str:
 
 
 def get_current_user(
-    authorization: Optional[str] = Header(None),
+    creds: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> _UserRow:
-    token = _get_bearer_token(authorization)
+    if creds is None or not creds.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = creds.credentials  # <-- token WITHOUT "Bearer "
     session = auth_storage.get_session(token)
     if not session:
         raise HTTPException(
@@ -289,6 +299,7 @@ def get_current_user(
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     user = auth_storage.get_user_by_id(session.user_id)
     if not user:
         raise HTTPException(
@@ -297,6 +308,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
 
 
 @router.get("/auth/me", response_model=UserPublic)
