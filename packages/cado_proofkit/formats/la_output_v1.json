@@ -1,0 +1,19 @@
+{
+  "format_id": "la_output@1",
+  "description": "Deterministic output format for CADO linear algebra stage",
+  "fields": [
+    {"name": "matrix_hash", "type": "hex", "required": true},
+    {"name": "vector_bits", "type": "bitstring", "required": true},
+    {"name": "iterations", "type": "int", "required": true},
+    {"name": "rank", "type": "int", "required": true},
+    {"name": "world_size", "type": "int", "required": true},
+    {"name": "seed", "type": "hex", "required": true}
+  ],
+  "notes": [
+    "vector_bits is the candidate kernel vector v for Mv=0 over F2.",
+    "matrix_hash is the hash commitment computed over canonical matrix rows.",
+    "seed is the run seed used to enforce determinism across providers.",
+    "This format is what the QC oracle verifies with the certificate check."
+  ]
+}
+

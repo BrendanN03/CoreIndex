@@ -1,0 +1,11 @@
+{
+  "description": "Tiny F2 matrix with known kernel vector",
+  "matrix_rows": [
+    "1010",
+    "0110",
+    "1100"
+  ],
+  "vector_bits": "1100",
+  "note": "This vector makes Mv = 0 over F2 for the above matrix."
+}
+

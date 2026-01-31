@@ -1,0 +1,9 @@
+{
+  "description": "Tiny N with known non-trivial factor",
+  "N": 187,
+  "x": 38,
+  "y": 5,
+  "expected_factor": 11,
+  "note": "gcd(|x - y|, N) = 11."
+}
+

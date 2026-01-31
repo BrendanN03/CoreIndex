@@ -40,6 +40,9 @@ from canonx.canonicalize import canonicalize_bytes  # noqa: E402
 from app.services.qc.sampling import load_policy, plan_sampling  # noqa: E402
 from app.services.qc.dispute import decision as dispute_decision  # noqa: E402
 
+from packages.cado_proofkit.verifier_f2 import verify_f2_matrix_vector  # noqa: E402
+from packages.cado_proofkit.hash_commit import hash_matrix_rows  # noqa: E402
+
 
 router = APIRouter()
 
@@ -63,6 +66,24 @@ class DisputeDecisionRequest(BaseModel):
     n_checked: int = Field(..., gt=0)
     eps0: float = Field(0.01, gt=0.0)
     alpha: float = Field(0.01, gt=0.0)
+
+
+class CertVerifyRequest(BaseModel):
+    matrix_rows: list[str] = Field(..., min_length=1)
+    vector_bits: str = Field(..., min_length=1)
+
+
+class LaOutputVerifyRequest(BaseModel):
+    matrix_hash: str = Field(..., min_length=3, description="Hex hash of matrix rows")
+    vector_bits: str = Field(..., min_length=1)
+    iterations: int = Field(..., ge=0)
+    rank: int = Field(..., ge=0)
+    world_size: int = Field(..., ge=1)
+    seed: str = Field(..., min_length=1)
+    matrix_rows: Optional[list[str]] = Field(
+        None,
+        description="Optional rows for full Mv=0 verification (demo-friendly)",
+    )
 
 
 def _read_upload_as_seekable(upload: UploadFile) -> io.BytesIO:
@@ -228,4 +249,48 @@ async def qc_dispute_decide(req: DisputeDecisionRequest):
         alpha=req.alpha,
     )
     return {"decision": outcome}
+
+
+@router.post("/qc/cert/verify")
+async def qc_cert_verify(req: CertVerifyRequest):
+    """
+    Verify an F2 certificate: Mv = 0 over GF(2).
+    Returns verified flag + a simple hash commitment for the matrix.
+    """
+    verified = verify_f2_matrix_vector(req.matrix_rows, req.vector_bits)
+    matrix_hash = hash_matrix_rows(req.matrix_rows)
+    return {"verified": verified, "matrix_hash": matrix_hash}
+
+
+@router.post("/qc/cert/verify_la_output")
+async def qc_cert_verify_la_output(req: LaOutputVerifyRequest):
+    """
+    Verify a full LA output object.
+
+    - If matrix_rows are provided, we verify Mv=0 and validate matrix_hash.
+    - If matrix_rows are omitted, we only return the provided hash and metadata
+      (useful for large matrices stored elsewhere).
+    """
+    matrix_hash = req.matrix_hash
+    verified = None
+
+    if req.matrix_rows:
+        computed_hash = hash_matrix_rows(req.matrix_rows)
+        if computed_hash != req.matrix_hash:
+            return {
+                "verified": False,
+                "matrix_hash": computed_hash,
+                "reason": "matrix_hash_mismatch",
+            }
+        verified = verify_f2_matrix_vector(req.matrix_rows, req.vector_bits)
+        matrix_hash = computed_hash
+
+    return {
+        "verified": verified,
+        "matrix_hash": matrix_hash,
+        "iterations": req.iterations,
+        "rank": req.rank,
+        "world_size": req.world_size,
+        "seed": req.seed,
+    }
 

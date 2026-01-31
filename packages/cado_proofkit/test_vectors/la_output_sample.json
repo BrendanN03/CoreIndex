@@ -1,0 +1,11 @@
+{
+  "matrix_hash": "0xdeadbeef",
+  "vector_bits": "1100",
+  "iterations": 42,
+  "rank": 0,
+  "world_size": 4,
+  "seed": "0xabc123",
+  "matrix_rows": ["1010", "0110", "1100"],
+  "note": "Sample LA output for /qc/cert/verify_la_output."
+}
+
