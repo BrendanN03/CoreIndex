@@ -1,0 +1,37 @@
+{
+    "schema_id": "table@1",
+    "description": "Canonical form for generic tabular outputs.",
+    "version": "1.0.0",
+    "on_wire_format": "jsonl_utf8",
+    "columns": [
+      {"name": "id",     "type": "string", "required": true},
+      {"name": "ts_utc", "type": "timestamp_rfc3339", "required": true},
+      {"name": "x",      "type": "float64", "required": true},
+      {"name": "y",      "type": "float64", "required": true},
+      {"name": "label",  "type": "string", "required": false}
+    ],
+    "primary_key": ["id","ts_utc"],
+    "sorting": {
+      "keys": ["id","ts_utc"],
+      "order": "asc",
+      "timestamp_norm": "force_utc_rfc3339_z"
+    },
+    "encoding_rules": {
+      "floats_on_wire": "decimal_ascii_17sig",
+      "strings": "utf8_nfc",
+      "booleans": "lowercase_true_false",
+      "nulls": "json_null"
+    },
+    "special_values": {
+      "nan_representation": "string_NaN",
+      "posinf_representation": "string_Inf",
+      "neginf_representation": "string_-Inf",
+      "tolerant_mode_only": ["NaN","Inf","-Inf"]
+    },
+    "notes": [
+      "Canonical form is JSONL with keys in fixed column order.",
+      "Timestamps are converted to UTC and formatted as RFC3339 'YYYY-MM-DDTHH:MM:SS.sssZ'.",
+      "Float printing uses 17 significant digits to be round-trip safe."
+    ]
+  }
+

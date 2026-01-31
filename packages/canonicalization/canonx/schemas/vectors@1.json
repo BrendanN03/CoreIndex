@@ -1,0 +1,29 @@
+{
+    "schema_id": "vectors@1",
+    "description": "Canonical form for id->vector<float64> outputs.",
+    "version": "1.0.0",
+    "on_wire_format": "jsonl_utf8",
+    "fields": [
+      {"name": "id",     "type": "string",  "required": true},
+      {"name": "vector", "type": "float64_array", "required": true, "length": "fixed"}
+    ],
+    "primary_key": ["id"],
+    "sorting": {
+      "keys": ["id"],
+      "order": "asc"
+    },
+    "encoding_rules": {
+      "float_array_on_wire": "decimal_ascii_17sig",
+      "strings": "utf8_nfc"
+    },
+    "special_values": {
+      "allow_nan": true,
+      "allow_inf": true,
+      "wire_tokens": {"NaN": "string_NaN", "Inf": "string_Inf", "-Inf": "string_-Inf"}
+    },
+    "notes": [
+      "All vectors must have the same fixed length per output set; otherwise reject pre-canonicalization.",
+      "Order is solely by 'id'; vector elements are in index order 0..n-1."
+    ]
+  }
+

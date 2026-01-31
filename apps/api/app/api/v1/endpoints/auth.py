@@ -1,26 +1,13 @@
-"""app.auth
+"""app.api.v1.endpoints.auth
 
 Simple, secure-ish local auth for development.
 
 This module intentionally mirrors the "in-memory now, DB later" approach used in
-storage.py. It provides:
+repositories. It provides:
 
 - POST /auth/register   (create account)
 - POST /auth/login      (get bearer token)
 - GET  /auth/me         (who am I?)
-
-Passwords
----------
-We store passwords using PBKDF2-HMAC-SHA256 with a per-user random salt.
-Format:
-
-    pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>
-
-Tokens
-------
-Login returns an opaque bearer token (random string) stored in-memory with an
-expiry. For production you would likely switch to JWTs or server-side sessions
-backed by Redis/DB.
 """
 
 from __future__ import annotations
@@ -34,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 
@@ -147,7 +134,7 @@ class AuthStorage:
         return row
 
 
-# Global auth storage instance (mirrors app.storage.storage)
+# Global auth storage instance
 auth_storage = AuthStorage()
 
 
@@ -212,7 +199,6 @@ router = APIRouter()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-
 @router.post("/auth/register", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
 def register(req: RegisterRequest):
     """Create a new user account."""
@@ -264,23 +250,6 @@ def login(req: LoginRequest):
     )
 
 
-def _get_bearer_token(authorization: Optional[str]) -> str:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header must be 'Bearer <token>'",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return parts[1].strip()
-
-
 def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> _UserRow:
@@ -291,7 +260,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = creds.credentials  # <-- token WITHOUT "Bearer "
+    token = creds.credentials  # token WITHOUT "Bearer "
     session = auth_storage.get_session(token)
     if not session:
         raise HTTPException(
@@ -310,7 +279,6 @@ def get_current_user(
     return user
 
 
-
 @router.get("/auth/me", response_model=UserPublic)
 def me(user: _UserRow = Depends(get_current_user)):
     """Return the currently-authenticated user."""
@@ -320,3 +288,4 @@ def me(user: _UserRow = Depends(get_current_user)):
         display_name=user.display_name,
         created_at=user.created_at,
     )
+

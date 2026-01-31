@@ -1,51 +1,67 @@
 """
-In-memory storage for jobs, nominations, and lots. Can be replaced with a database in production.
+In-memory storage for jobs, nominations, and lots.
+
+This is a dev/test implementation. It is intentionally small and can be replaced with
+a DB-backed implementation later.
 """
+
+from __future__ import annotations
+
 from typing import Dict, Optional
-from app.models import (
-    JobCreateRequest, JobResponse, JobStatus, Window, PackageDescriptor,
-    NominationRequest, NominationResponse, Lot, LotStatus, PrepareReadyRequest
-)
 from datetime import datetime
 import uuid
 
+from app.schemas.models import (
+    JobCreateRequest,
+    JobResponse,
+    JobStatus,
+    Window,
+    NominationRequest,
+    NominationResponse,
+    Lot,
+    LotStatus,
+)
+
 
 class JobStorage:
-    """Simple in-memory job storage"""
-    
+    """Simple in-memory job storage."""
+
     def __init__(self):
         self._jobs: Dict[str, JobResponse] = {}
         self._vouchers: Dict[str, float] = {}  # key -> voucher amount in NGH
         self._nominations: Dict[str, NominationResponse] = {}
         self._lots: Dict[str, Lot] = {}
-    
+
+    # ---- jobs ----
     def create_job(self, request: JobCreateRequest) -> JobResponse:
-        """Create a new job"""
+        """Create a new job."""
         job = JobResponse(
             job_id=request.job_id,
             status=JobStatus.PENDING,
             window=request.window,
             package_index=request.package_index,
             created_at=datetime.utcnow().isoformat() + "Z",
-            relay_links=None
+            relay_links=None,
         )
         self._jobs[request.job_id] = job
         return job
-    
+
     def get_job(self, job_id: str) -> Optional[JobResponse]:
-        """Get a job by ID"""
+        """Get a job by ID."""
         return self._jobs.get(job_id)
-    
+
+    # ---- vouchers (demo) ----
     def get_voucher_balance(self, key: str) -> float:
-        """Get voucher balance for a given key"""
+        """Get voucher balance for a given key."""
         return self._vouchers.get(key, 0.0)
-    
+
     def set_voucher_balance(self, key: str, amount: float):
-        """Set voucher balance for a given key (for testing/demo purposes)"""
+        """Set voucher balance for a given key (for testing/demo purposes)."""
         self._vouchers[key] = amount
-    
+
+    # ---- nominations ----
     def create_nomination(self, request: NominationRequest) -> NominationResponse:
-        """Create a new nomination"""
+        """Create a new nomination."""
         nomination_id = str(uuid.uuid4())
         nomination = NominationResponse(
             nomination_id=nomination_id,
@@ -54,17 +70,18 @@ class JobStorage:
             tier=request.tier,
             sla=request.sla,
             ngh_available=request.ngh_available,
-            created_at=datetime.utcnow().isoformat() + "Z"
+            created_at=datetime.utcnow().isoformat() + "Z",
         )
         self._nominations[nomination_id] = nomination
         return nomination
-    
+
     def get_nomination(self, nomination_id: str) -> Optional[NominationResponse]:
-        """Get a nomination by ID"""
+        """Get a nomination by ID."""
         return self._nominations.get(nomination_id)
-    
+
+    # ---- lots ----
     def create_lot(self, window: Window, job_id: Optional[str] = None) -> Lot:
-        """Create a new lot"""
+        """Create a new lot."""
         lot_id = str(uuid.uuid4())
         lot = Lot(
             lot_id=lot_id,
@@ -78,25 +95,25 @@ class JobStorage:
             item_count=None,
             wall_time_seconds=None,
             raw_gpu_time_seconds=None,
-            logs_uri=None
+            logs_uri=None,
         )
         self._lots[lot_id] = lot
         return lot
-    
+
     def get_lot(self, lot_id: str) -> Optional[Lot]:
-        """Get a lot by ID"""
+        """Get a lot by ID."""
         return self._lots.get(lot_id)
-    
+
     def update_lot_prepare_ready(self, lot_id: str) -> Optional[Lot]:
-        """Update lot status to ready after preparation"""
+        """Update lot status to ready after preparation."""
         lot = self._lots.get(lot_id)
         if lot:
             lot.status = LotStatus.READY
             lot.prepared_at = datetime.utcnow().isoformat() + "Z"
         return lot
-    
+
     def update_lot_result(self, lot_id: str, result_data: dict) -> Optional[Lot]:
-        """Update lot with result data"""
+        """Update lot with result data."""
         lot = self._lots.get(lot_id)
         if lot:
             lot.status = LotStatus.COMPLETED
@@ -109,5 +126,6 @@ class JobStorage:
         return lot
 
 
-# Global storage instance
+# Global storage instance (kept for parity with previous layout)
 storage = JobStorage()
+

@@ -1,0 +1,2 @@
+# Monorepo shared packages namespace.
+

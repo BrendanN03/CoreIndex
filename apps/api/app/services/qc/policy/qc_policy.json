@@ -1,0 +1,30 @@
+{
+  "version": "1.0.0",
+  "defaults": {
+    "dup_rate": 0.05,
+    "canary_rate": 0.01,
+    "spot_rate": 0.005,
+    "min_dup_packages": 1,
+    "min_canaries_per_pkg": 100,
+    "min_spot_items_per_pkg": 50,
+    "rel_tol": 1e-4,
+    "max_ulp": 2
+  },
+  "dispute": {
+    "reexec_fraction": 0.10,
+    "alpha": 0.01,
+    "epsilon_threshold": 0.01
+  },
+  "seeding": {
+    "rng": "hmac_sha256_drbg",
+    "commit_phase": "gate_close",
+    "job_seed_material": [
+      "job_id",
+      "window",
+      "tier",
+      "secret_epoch"
+    ],
+    "provider_independence": true
+  }
+}
+

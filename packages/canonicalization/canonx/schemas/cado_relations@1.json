@@ -1,0 +1,36 @@
+{
+    "schema_id": "cado_relations@1",
+    "description": "Canonical form for CADO-NFS siever relations.",
+    "version": "1.0.0",
+    "on_wire_format": "jsonl_utf8",
+    "fields": [
+      {"name": "a",           "type": "int64",  "required": true},
+      {"name": "b",           "type": "int64",  "required": true},
+      {"name": "c",           "type": "int64",  "required": true},
+      {"name": "prime1",      "type": "int64",  "required": true},
+      {"name": "prime2",      "type": "int64",  "required": true},
+      {"name": "large_prime", "type": "int64",  "required": false}
+    ],
+    "primary_key": ["a","b","c","prime1","prime2","large_prime"],
+    "sorting": {
+      "keys": ["a","b","c","prime1","prime2","large_prime"],
+      "order": "asc"
+    },
+    "encoding_rules": {
+      "integers": "decimal_ascii_no_sign_plus",
+      "floats": null,
+      "strings": "utf8_nfc",
+      "booleans": "lowercase_true_false",
+      "nulls": "json_null"
+    },
+    "special_values": {
+      "allow_nan": false,
+      "allow_inf": false
+    },
+    "notes": [
+      "Canonical output is JSON Lines: one object per line, fields in the listed order.",
+      "No hex or scientific notation for integers.",
+      "Records missing optional 'large_prime' must omit the field entirely (not null)."
+    ]
+  }
+
