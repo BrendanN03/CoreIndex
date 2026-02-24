@@ -7,7 +7,7 @@ a DB-backed implementation later.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 import uuid
 
@@ -33,7 +33,9 @@ class JobStorage:
         self._lots: Dict[str, Lot] = {}
 
     # ---- jobs ----
-    def create_job(self, request: JobCreateRequest) -> JobResponse:
+    def create_job(
+        self, request: JobCreateRequest, created_by: Optional[str] = None
+    ) -> JobResponse:
         """Create a new job."""
         job = JobResponse(
             job_id=request.job_id,
@@ -42,6 +44,7 @@ class JobStorage:
             package_index=request.package_index,
             created_at=datetime.utcnow().isoformat() + "Z",
             relay_links=None,
+            created_by=created_by,
         )
         self._jobs[request.job_id] = job
         return job
@@ -49,6 +52,14 @@ class JobStorage:
     def get_job(self, job_id: str) -> Optional[JobResponse]:
         """Get a job by ID."""
         return self._jobs.get(job_id)
+
+    def list_jobs(self, created_by: Optional[str] = None) -> List[JobResponse]:
+        """List jobs, newest first. If created_by is set, only return that user's jobs."""
+        jobs = list(self._jobs.values())
+        if created_by is not None:
+            jobs = [j for j in jobs if getattr(j, "created_by", None) == created_by]
+        jobs.sort(key=lambda j: j.created_at or "", reverse=True)
+        return jobs
 
     # ---- vouchers (demo) ----
     def get_voucher_balance(self, key: str) -> float:
@@ -80,7 +91,12 @@ class JobStorage:
         return self._nominations.get(nomination_id)
 
     # ---- lots ----
-    def create_lot(self, window: Window, job_id: Optional[str] = None) -> Lot:
+    def create_lot(
+        self,
+        window: Window,
+        job_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> Lot:
         """Create a new lot."""
         lot_id = str(uuid.uuid4())
         lot = Lot(
@@ -96,6 +112,7 @@ class JobStorage:
             wall_time_seconds=None,
             raw_gpu_time_seconds=None,
             logs_uri=None,
+            provider_id=provider_id,
         )
         self._lots[lot_id] = lot
         return lot
@@ -103,6 +120,14 @@ class JobStorage:
     def get_lot(self, lot_id: str) -> Optional[Lot]:
         """Get a lot by ID."""
         return self._lots.get(lot_id)
+
+    def list_lots(self, provider_id: Optional[str] = None) -> List[Lot]:
+        """List lots, newest first. If provider_id is set, only return that provider's lots."""
+        lots = list(self._lots.values())
+        if provider_id is not None:
+            lots = [l for l in lots if getattr(l, "provider_id", None) == provider_id]
+        lots.sort(key=lambda l: l.created_at or "", reverse=True)
+        return lots
 
     def update_lot_prepare_ready(self, lot_id: str) -> Optional[Lot]:
         """Update lot status to ready after preparation."""

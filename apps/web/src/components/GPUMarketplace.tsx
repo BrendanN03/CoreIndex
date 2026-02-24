@@ -5,6 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Input } from './ui/input';
 import { Server, MapPin, Zap, TrendingUp, Search } from 'lucide-react';
 import { useState } from 'react';
+import { JobApi, type JobCreateRequestDto } from '../lib/api';
 
 interface GPUListing {
   id: string;
@@ -121,11 +122,15 @@ const gpuListings: GPUListing[] = [
 interface GPUMarketplaceProps {
   onSelectGPU: (gpu: string) => void;
   selectedGPU: string;
+  /** Called after a job is successfully created (e.g. to refresh My Jobs). */
+  onJobCreated?: () => void;
 }
 
-export function GPUMarketplace({ onSelectGPU, selectedGPU }: GPUMarketplaceProps) {
+export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMarketplaceProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('price');
+   const [status, setStatus] = useState<string | null>(null);
+   const [isCreating, setIsCreating] = useState(false);
 
   const filteredListings = gpuListings
     .filter(gpu => 
@@ -139,6 +144,63 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU }: GPUMarketplaceProps
       if (sortBy === 'availability') return b.availability - a.availability;
       return 0;
     });
+
+  async function handleConnectClick(gpu: GPUListing) {
+    onSelectGPU(gpu.name);
+    setStatus(null);
+    setIsCreating(true);
+
+    try {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+
+      const body: JobCreateRequestDto = {
+        job_id: `job-${Date.now()}`,
+        window: {
+          // Map UI regions into the backend enum values.
+          // For now, use a simple heuristic based on the listing location.
+          region: gpu.location.toLowerCase().includes('asia')
+            ? 'asia-pacific'
+            : gpu.location.toLowerCase().includes('eu')
+            ? 'eu-central'
+            : gpu.location.toLowerCase().includes('west')
+            ? 'us-west'
+            : 'us-east',
+          iso_hour: utcHour,
+          sla: 'standard',
+          tier: 'standard',
+        },
+        package_index: [
+          {
+            package_id: `pkg-${Date.now()}`,
+            size_estimate_ngh: 10,
+            first_output_estimate_seconds: 60,
+            metadata: {
+              gpu_name: gpu.name,
+              provider: gpu.provider,
+            },
+          },
+        ],
+      };
+
+      await JobApi.createJob(body);
+      const feas = await JobApi.getFeasibility(body.job_id);
+
+      setStatus(
+        `Created job ${body.job_id}: NGH=${feas.ngh_required.toFixed(
+          2,
+        )}, voucher_gap=${feas.voucher_gap.toFixed(2)}, ` +
+          `first_output_ok=${feas.milestone_sanity.first_output_ok ? 'yes' : 'no'}, ` +
+          `size_band_ok=${feas.milestone_sanity.size_band_ok ? 'yes' : 'no'}`,
+      );
+      onJobCreated?.();
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed to create demo job or fetch feasibility. See console for details.');
+    } finally {
+      setIsCreating(false);
+    }
+  }
 
   return (
     <Card className="bg-slate-900 border-slate-800 p-6">
@@ -250,16 +312,26 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU }: GPUMarketplaceProps
                   <div className="text-sm text-slate-100">{gpu.availability} units</div>
                 </div>
               </div>
-              <Button 
-                size="sm" 
+              <Button
+                size="sm"
                 className="bg-blue-600 hover:bg-blue-700"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleConnectClick(gpu);
+                }}
+                disabled={isCreating}
               >
-                Connect
+                {isCreating ? 'Connecting...' : 'Connect'}
               </Button>
             </div>
           </div>
         ))}
       </div>
+      {status && (
+        <div className="mt-4 text-xs text-slate-300 border-t border-slate-800 pt-3">
+          {status}
+        </div>
+      )}
     </Card>
   );
 }

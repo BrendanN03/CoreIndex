@@ -1,5 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.api.v1.endpoints.auth import get_current_user_optional
 from app.repositories.memory.storage import storage
 from app.schemas.models import (
     Lot,
@@ -16,6 +19,17 @@ from app.schemas.models import (
 router = APIRouter()
 
 
+@router.get("/lots", response_model=List[Lot])
+def list_lots(user=Depends(get_current_user_optional)):
+    """
+    List lots (newest first).
+    If the request includes a valid Bearer token, only that user's (provider's) lots are returned.
+    Otherwise all lots are returned (for demo/backward compatibility).
+    """
+    provider_id = user.user_id if user else None
+    return storage.list_lots(provider_id=provider_id)
+
+
 @router.post(
     "/nominations", response_model=NominationResponse, status_code=status.HTTP_201_CREATED
 )
@@ -28,11 +42,13 @@ def create_nomination(request: NominationRequest):
 
 
 @router.post("/lots", response_model=Lot, status_code=status.HTTP_201_CREATED)
-def create_lot(request: LotCreateRequest):
+def create_lot(request: LotCreateRequest, user=Depends(get_current_user_optional)):
     """
     Provider endpoint: Create a new lot for execution.
+    If the request includes a valid Bearer token, the lot is tied to that user (provider_id).
     """
-    lot = storage.create_lot(request.window, request.job_id)
+    provider_id = user.user_id if user else None
+    lot = storage.create_lot(request.window, request.job_id, provider_id=provider_id)
     return lot
 
 

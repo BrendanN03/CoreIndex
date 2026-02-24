@@ -19,7 +19,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -35,6 +35,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=256)
     display_name: Optional[str] = Field(None, max_length=80)
+    role: Literal["buyer", "seller"]
 
 
 class LoginRequest(BaseModel):
@@ -46,6 +47,7 @@ class UserPublic(BaseModel):
     user_id: str
     email: EmailStr
     display_name: Optional[str]
+    role: Literal["buyer", "seller"]
     created_at: str
 
 
@@ -66,6 +68,7 @@ class _UserRow:
     user_id: str
     email: str
     display_name: Optional[str]
+    role: str
     password_hash: str
     created_at: str
 
@@ -90,10 +93,20 @@ class AuthStorage:
         self._token_ttl = timedelta(hours=token_ttl_hours)
 
     # ---- users ----
-    def create_user(self, *, email: str, password: str, display_name: Optional[str]) -> _UserRow:
+    def create_user(
+        self,
+        *,
+        email: str,
+        password: str,
+        display_name: Optional[str],
+        role: Literal["buyer", "seller"],
+    ) -> _UserRow:
         email_key = email.strip().lower()
         if email_key in self._users_by_email:
             raise ValueError("email_already_registered")
+
+        if role not in ("buyer", "seller"):
+            raise ValueError("invalid_role")
 
         user_id = str(uuid.uuid4())
         password_hash = _hash_password(password)
@@ -102,6 +115,7 @@ class AuthStorage:
             user_id=user_id,
             email=email_key,
             display_name=display_name,
+            role=role,
             password_hash=password_hash,
             created_at=created_at,
         )
@@ -207,6 +221,7 @@ def register(req: RegisterRequest):
             email=req.email,
             password=req.password,
             display_name=req.display_name,
+            role=req.role,
         )
     except ValueError as e:
         if str(e) == "email_already_registered":
@@ -214,12 +229,18 @@ def register(req: RegisterRequest):
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Email is already registered",
             )
+        if str(e) == "invalid_role":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="role must be 'buyer' or 'seller'",
+            )
         raise
 
     return UserPublic(
         user_id=row.user_id,
         email=row.email,
         display_name=row.display_name,
+        role=row.role,  # type: ignore[arg-type]
         created_at=row.created_at,
     )
 
@@ -245,6 +266,7 @@ def login(req: LoginRequest):
             user_id=row.user_id,
             email=row.email,
             display_name=row.display_name,
+            role=row.role,  # type: ignore[arg-type]
             created_at=row.created_at,
         ),
     )
@@ -279,6 +301,18 @@ def get_current_user(
     return user
 
 
+def get_current_user_optional(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> Optional[_UserRow]:
+    """Return the current user if a valid Bearer token is present; otherwise None."""
+    if creds is None or not creds.credentials:
+        return None
+    session = auth_storage.get_session(creds.credentials)
+    if not session:
+        return None
+    return auth_storage.get_user_by_id(session.user_id)
+
+
 @router.get("/auth/me", response_model=UserPublic)
 def me(user: _UserRow = Depends(get_current_user)):
     """Return the currently-authenticated user."""
@@ -286,6 +320,7 @@ def me(user: _UserRow = Depends(get_current_user)):
         user_id=user.user_id,
         email=user.email,
         display_name=user.display_name,
+        role=user.role,  # type: ignore[arg-type]
         created_at=user.created_at,
     )
 

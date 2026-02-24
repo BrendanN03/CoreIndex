@@ -112,6 +112,9 @@ class JobResponse(BaseModel):
     relay_links: Optional[List[RelayLink]] = Field(
         None, description="Relay links for manifests"
     )
+    created_by: Optional[str] = Field(
+        None, description="User ID of the buyer who created the job"
+    )
 
 
 # Provider-side models
@@ -169,6 +172,9 @@ class Lot(BaseModel):
     job_id: Optional[str] = Field(None, description="Associated job ID if assigned")
     window: Window
     created_at: str = Field(..., description="Lot creation timestamp in ISO 8601 format")
+    provider_id: Optional[str] = Field(
+        None, description="User ID of the provider who owns this lot"
+    )
     prepared_at: Optional[str] = Field(
         None, description="Preparation ready timestamp in ISO 8601 format"
     )

@@ -1,7 +1,8 @@
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.v1.endpoints.auth import get_current_user_optional
 from app.repositories.memory.storage import storage
 from app.schemas.models import (
     FeasibilityResponse,
@@ -22,7 +23,10 @@ router = APIRouter()
 
 
 @router.post("/jobs", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
-def create_job(request: JobCreateRequest):
+def create_job(
+    request: JobCreateRequest,
+    user=Depends(get_current_user_optional),
+):
     """
     Create a new compute job.
 
@@ -30,6 +34,8 @@ def create_job(request: JobCreateRequest):
     - job_id: Unique identifier for the job
     - window: Region, ISO hour, SLA, and tier
     - package_index: List of PackageDescriptor objects
+
+    If the request includes a valid Bearer token, the job is tied to that user (created_by).
     """
     existing_job = storage.get_job(request.job_id)
     if existing_job:
@@ -38,8 +44,20 @@ def create_job(request: JobCreateRequest):
             detail=f"Job with id '{request.job_id}' already exists",
         )
 
-    job = storage.create_job(request)
+    created_by = user.user_id if user else None
+    job = storage.create_job(request, created_by=created_by)
     return job
+
+
+@router.get("/jobs", response_model=List[JobResponse])
+def list_jobs(user=Depends(get_current_user_optional)):
+    """
+    List jobs (newest first).
+    If the request includes a valid Bearer token, only that user's jobs are returned.
+    Otherwise all jobs are returned (for demo/backward compatibility).
+    """
+    created_by = user.user_id if user else None
+    return storage.list_jobs(created_by=created_by)
 
 
 @router.get("/jobs/{job_id}/feasibility", response_model=FeasibilityResponse)

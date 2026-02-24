@@ -1,5 +1,4 @@
 import { Card } from './ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -118,76 +117,39 @@ export function OrderBook({ selectedGPU }: OrderBookProps) {
         </div>
       </Card>
 
-      {/* Trading Panel */}
+      {/* Trading Panel — buyer only: place buy orders / acquire compute */}
       <Card className="bg-slate-900 border-slate-800 p-6">
-        <Tabs defaultValue="buy">
-          <TabsList className="w-full bg-slate-800">
-            <TabsTrigger value="buy" className="flex-1">Buy</TabsTrigger>
-            <TabsTrigger value="sell" className="flex-1">Sell</TabsTrigger>
-          </TabsList>
-          
-          <TabsContent value="buy" className="space-y-4 mt-4">
-            <div>
-              <Label>Price ($/hour)</Label>
-              <Input 
-                type="number" 
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                className="bg-slate-800 border-slate-700 mt-1"
-                step="0.01"
-              />
+        <h3 className="mb-4 text-slate-100">Buy Compute</h3>
+        <div className="space-y-4">
+          <div>
+            <Label>Price ($/hour)</Label>
+            <Input 
+              type="number" 
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              className="bg-slate-800 border-slate-700 mt-1"
+              step="0.01"
+            />
+          </div>
+          <div>
+            <Label>Compute Hours</Label>
+            <Input 
+              type="number" 
+              value={hours}
+              onChange={(e) => setHours(e.target.value)}
+              className="bg-slate-800 border-slate-700 mt-1"
+            />
+          </div>
+          <div className="p-3 bg-slate-800 rounded-lg">
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-slate-400">Total Cost</span>
+              <span className="text-slate-100">${(parseFloat(price) * parseFloat(hours || '0')).toFixed(2)}</span>
             </div>
-            <div>
-              <Label>Compute Hours</Label>
-              <Input 
-                type="number" 
-                value={hours}
-                onChange={(e) => setHours(e.target.value)}
-                className="bg-slate-800 border-slate-700 mt-1"
-              />
-            </div>
-            <div className="p-3 bg-slate-800 rounded-lg">
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-400">Total Cost</span>
-                <span className="text-slate-100">${(parseFloat(price) * parseFloat(hours || '0')).toFixed(2)}</span>
-              </div>
-            </div>
-            <Button className="w-full bg-green-600 hover:bg-green-700">
-              Buy Compute Hours
-            </Button>
-          </TabsContent>
-
-          <TabsContent value="sell" className="space-y-4 mt-4">
-            <div>
-              <Label>Price ($/hour)</Label>
-              <Input 
-                type="number" 
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                className="bg-slate-800 border-slate-700 mt-1"
-                step="0.01"
-              />
-            </div>
-            <div>
-              <Label>Compute Hours</Label>
-              <Input 
-                type="number" 
-                value={hours}
-                onChange={(e) => setHours(e.target.value)}
-                className="bg-slate-800 border-slate-700 mt-1"
-              />
-            </div>
-            <div className="p-3 bg-slate-800 rounded-lg">
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-400">Total Revenue</span>
-                <span className="text-slate-100">${(parseFloat(price) * parseFloat(hours || '0')).toFixed(2)}</span>
-              </div>
-            </div>
-            <Button className="w-full bg-red-600 hover:bg-red-700">
-              Sell Compute Hours
-            </Button>
-          </TabsContent>
-        </Tabs>
+          </div>
+          <Button className="w-full bg-green-600 hover:bg-green-700">
+            Buy Compute Hours
+          </Button>
+        </div>
       </Card>
 
       {/* Recent Trades */}
