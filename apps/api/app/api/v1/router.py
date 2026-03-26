@@ -26,4 +26,3 @@ router.include_router(provider.router, tags=["provider"])
 router.include_router(qc.router, tags=["qc"])
 router.include_router(vouchers.router, tags=["vouchers"])
 router.include_router(platform.router, tags=["platform"])
-

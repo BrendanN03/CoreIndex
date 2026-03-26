@@ -5,7 +5,7 @@
 From the repo root:
 
 ```bash
-cd "apps/api/app"
+cd "apps/api"
 
 # Create a virtual environment (if you don’t already have one)
 python -m venv ../venv
