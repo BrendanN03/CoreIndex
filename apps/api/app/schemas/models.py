@@ -39,6 +39,27 @@ class Window(BaseModel):
     tier: Tier
 
 
+class ProductKey(BaseModel):
+    """Canonical market key shared by positions, vouchers, and jobs."""
+
+    region: Region
+    iso_hour: int = Field(..., ge=0, le=23, description="ISO hour (0-23)")
+    sla: SLA
+    tier: Tier
+
+    @classmethod
+    def from_window(cls, window: "Window") -> "ProductKey":
+        return cls(
+            region=window.region,
+            iso_hour=window.iso_hour,
+            sla=window.sla,
+            tier=window.tier,
+        )
+
+    def as_storage_key(self) -> str:
+        return f"{self.region.value}:{self.iso_hour}:{self.sla.value}:{self.tier.value}"
+
+
 class PackageDescriptor(BaseModel):
     """Descriptor for a compute package"""
 
@@ -73,6 +94,686 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class VoucherState(str, Enum):
+    """Lifecycle state for physically delivered compute claims."""
+
+    MINTED = "minted"
+    DEPOSITED = "deposited"
+    CONSUMED = "consumed"
+
+
+class SessionState(str, Enum):
+    """Lifecycle state for collective sessions."""
+
+    DECLARED = "declared"
+    FINALIZED = "finalized"
+    READY = "ready"
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    DEGRADED = "degraded"
+
+
+class SettlementState(str, Enum):
+    """Lifecycle state for settlement runs."""
+
+    PENDING = "pending"
+    READY = "ready"
+    SETTLED = "settled"
+    FAILED = "failed"
+
+
+class PlatformEvent(BaseModel):
+    """Minimal event shape used for audit-friendly demo state."""
+
+    event_id: str
+    event_type: str
+    created_at: str
+    entity_type: str
+    entity_id: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PlatformStatusResponse(BaseModel):
+    """Visible platform metadata exposed to the frontend shell."""
+
+    current_phase: str
+    current_focus: str
+    api_version: str
+    capabilities: List[str]
+    event_count: int = Field(..., ge=0)
+    recent_events: List[PlatformEvent] = Field(default_factory=list)
+
+
+class GpuBackendStatusResponse(BaseModel):
+    """Connectivity hints for the remote CADO / GPU HTTP service (demo factoring step)."""
+
+    configured_base_url: str
+    factor_post_url: str
+    ssh_host_label: str
+    tcp_reachable: bool
+    tcp_error: Optional[str] = None
+    requests_installed: bool = True
+    setup_hint: str
+
+
+class PositionSide(str, Enum):
+    """Trade side for exchange positions."""
+
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OptionType(str, Enum):
+    """Supported option styles for compute contracts."""
+
+    CALL = "call"
+    PUT = "put"
+
+
+class OptionContractStatus(str, Enum):
+    """Lifecycle state for listed option contracts."""
+
+    OPEN = "open"
+    EXPIRED = "expired"
+
+
+class OptionOrderSide(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OptionOrderStatus(str, Enum):
+    OPEN = "open"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+
+
+class TimeInForce(str, Enum):
+    GTC = "gtc"
+    IOC = "ioc"
+    FOK = "fok"
+
+
+class MarketPositionStatus(str, Enum):
+    """Lifecycle state for physically deliverable market positions."""
+
+    OPEN = "open"
+    SETTLED = "settled"
+
+
+class MarketPositionCreateRequest(BaseModel):
+    """Request to create a demo physically deliverable compute position."""
+
+    product_key: ProductKey
+    side: PositionSide = PositionSide.BUY
+    quantity_ngh: float = Field(..., gt=0)
+    price_per_ngh: float = Field(..., gt=0)
+
+
+class MarketPositionResponse(BaseModel):
+    """Exchange position summary shown in the buyer UI."""
+
+    position_id: str
+    product_key: ProductKey
+    side: PositionSide
+    quantity_ngh: float
+    price_per_ngh: float
+    notional: float
+    status: MarketPositionStatus
+    created_at: str
+    settled_at: Optional[str] = None
+    owner_id: Optional[str] = None
+
+
+class VoucherBalanceResponse(BaseModel):
+    """Wallet-like voucher balance for one product key."""
+
+    product_key: ProductKey
+    balance_ngh: float = Field(..., ge=0)
+    deposited_ngh: float = Field(..., ge=0)
+
+
+class VoucherDepositRequest(BaseModel):
+    """Escrow vouchers to a job for a given product key."""
+
+    job_id: str
+    product_key: ProductKey
+    amount_ngh: float = Field(..., gt=0)
+
+
+class VoucherDepositResponse(BaseModel):
+    """Result of escrowing vouchers against a job."""
+
+    job_id: str
+    product_key: ProductKey
+    deposited_ngh: float = Field(..., ge=0)
+    remaining_balance_ngh: float = Field(..., ge=0)
+
+
+class ExchangeOrderSide(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class ExchangeOrderStatus(str, Enum):
+    OPEN = "open"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+
+
+class ExchangeOrderCreateRequest(BaseModel):
+    product_key: ProductKey
+    side: ExchangeOrderSide
+    price_per_ngh: float = Field(..., gt=0)
+    quantity_ngh: float = Field(..., gt=0)
+    time_in_force: TimeInForce = TimeInForce.GTC
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class ExchangeOrderAmendRequest(BaseModel):
+    price_per_ngh: Optional[float] = Field(None, gt=0)
+    quantity_ngh: Optional[float] = Field(None, gt=0)
+
+
+class ExchangeOrderResponse(BaseModel):
+    order_id: str
+    product_key: ProductKey
+    side: ExchangeOrderSide
+    price_per_ngh: float
+    quantity_ngh: float
+    remaining_ngh: float
+    time_in_force: TimeInForce = TimeInForce.GTC
+    status: ExchangeOrderStatus
+    created_at: str
+    owner_id: Optional[str] = None
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class ExchangeTradeResponse(BaseModel):
+    trade_id: str
+    product_key: ProductKey
+    buy_order_id: str
+    sell_order_id: str
+    price_per_ngh: float
+    quantity_ngh: float
+    notional: float
+    created_at: str
+
+
+class ExchangeOrderBookLevel(BaseModel):
+    price_per_ngh: float
+    quantity_ngh: float
+
+
+class ExchangeOrderBookResponse(BaseModel):
+    product_key: ProductKey
+    bids: List[ExchangeOrderBookLevel]
+    asks: List[ExchangeOrderBookLevel]
+    spread: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+
+
+class OptionQuoteRequest(BaseModel):
+    option_type: OptionType
+    forward_price_per_ngh: float = Field(..., gt=0)
+    strike_price_per_ngh: float = Field(..., gt=0)
+    time_to_expiry_years: float = Field(..., gt=0)
+    implied_volatility: float = Field(..., gt=0)
+    risk_free_rate: float = Field(0.0)
+    quantity_ngh: float = Field(1.0, gt=0)
+
+
+class OptionGreeks(BaseModel):
+    delta: float
+    gamma: float
+    vega: float
+    theta: float
+    rho: float
+
+
+class OptionQuoteResponse(BaseModel):
+    option_type: OptionType
+    premium_per_ngh: float = Field(..., ge=0)
+    premium_notional: float = Field(..., ge=0)
+    intrinsic_value_per_ngh: float = Field(..., ge=0)
+    time_value_per_ngh: float = Field(..., ge=0)
+    greeks: OptionGreeks
+
+
+class OptionContractCreateRequest(BaseModel):
+    product_key: ProductKey
+    side: PositionSide = PositionSide.BUY
+    option_type: OptionType
+    forward_price_per_ngh: float = Field(..., gt=0)
+    strike_price_per_ngh: float = Field(..., gt=0)
+    time_to_expiry_years: float = Field(..., gt=0)
+    implied_volatility: float = Field(..., gt=0)
+    risk_free_rate: float = Field(0.0)
+    quantity_ngh: float = Field(..., gt=0)
+
+
+class OptionContractResponse(BaseModel):
+    contract_id: str
+    product_key: ProductKey
+    side: PositionSide
+    option_type: OptionType
+    forward_price_per_ngh: float
+    strike_price_per_ngh: float
+    time_to_expiry_years: float
+    implied_volatility: float
+    risk_free_rate: float
+    quantity_ngh: float
+    status: OptionContractStatus
+    premium_per_ngh: float
+    premium_notional: float
+    created_at: str
+    owner_id: Optional[str] = None
+
+
+class OptionOrderCreateRequest(BaseModel):
+    contract_id: str
+    side: OptionOrderSide
+    limit_price_per_ngh: float = Field(..., gt=0)
+    quantity_ngh: float = Field(..., gt=0)
+    time_in_force: TimeInForce = TimeInForce.GTC
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class OptionOrderAmendRequest(BaseModel):
+    limit_price_per_ngh: Optional[float] = Field(None, gt=0)
+    quantity_ngh: Optional[float] = Field(None, gt=0)
+
+
+class OptionOrderResponse(BaseModel):
+    order_id: str
+    contract_id: str
+    product_key: ProductKey
+    side: OptionOrderSide
+    limit_price_per_ngh: float
+    quantity_ngh: float
+    remaining_ngh: float
+    time_in_force: TimeInForce = TimeInForce.GTC
+    status: OptionOrderStatus
+    created_at: str
+    owner_id: Optional[str] = None
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class OptionTradeResponse(BaseModel):
+    trade_id: str
+    contract_id: str
+    product_key: ProductKey
+    buy_order_id: str
+    sell_order_id: str
+    price_per_ngh: float
+    quantity_ngh: float
+    notional: float
+    created_at: str
+
+
+class OptionOrderBookLevel(BaseModel):
+    price_per_ngh: float
+    quantity_ngh: float
+
+
+class OptionOrderBookResponse(BaseModel):
+    contract_id: str
+    product_key: ProductKey
+    bids: List[OptionOrderBookLevel]
+    asks: List[OptionOrderBookLevel]
+    spread: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+
+
+class RiskSummaryResponse(BaseModel):
+    owner_id: str
+    max_notional_limit: float = Field(..., ge=0)
+    used_notional: float = Field(..., ge=0)
+    remaining_notional: float = Field(..., ge=0)
+    max_margin_limit: float = Field(..., ge=0)
+    used_margin: float = Field(..., ge=0)
+    remaining_margin: float = Field(..., ge=0)
+    updated_at: str
+
+
+class FuturesPositionRow(BaseModel):
+    product_key: ProductKey
+    net_quantity_ngh: float
+    avg_entry_price: float
+    last_price: float
+    unrealized_pnl: float
+
+
+class OptionPositionRow(BaseModel):
+    contract_id: str
+    product_key: ProductKey
+    net_quantity_ngh: float
+    avg_entry_premium: float
+    last_premium: float
+    unrealized_pnl: float
+
+
+class TraderPortfolioResponse(BaseModel):
+    owner_id: str
+    unrealized_pnl_total: float
+    open_futures_order_count: int = Field(..., ge=0)
+    open_option_order_count: int = Field(..., ge=0)
+    recent_futures_trade_count: int = Field(..., ge=0)
+    recent_option_trade_count: int = Field(..., ge=0)
+    futures_positions: List[FuturesPositionRow]
+    option_positions: List[OptionPositionRow]
+    updated_at: str
+
+
+class MarginStressResponse(BaseModel):
+    owner_id: str
+    base_unrealized_pnl: float
+    stressed_unrealized_pnl: float
+    used_margin: float = Field(..., ge=0)
+    stress_margin_ratio: float = Field(..., ge=0)
+    margin_call_triggered: bool
+    price_shock_pct: float
+    option_vol_shock_pct: float
+    updated_at: str
+
+
+class LiquidationResponse(BaseModel):
+    owner_id: str
+    cancelled_futures_orders: int = Field(..., ge=0)
+    cancelled_option_orders: int = Field(..., ge=0)
+    liquidation_triggered: bool
+    reason: str
+    updated_at: str
+
+
+class RiskProfileResponse(BaseModel):
+    owner_id: str
+    max_notional_limit: float = Field(..., gt=0)
+    max_margin_limit: float = Field(..., gt=0)
+    max_order_notional: float = Field(..., gt=0)
+    kill_switch_enabled: bool
+    updated_at: str
+
+
+class RiskProfileUpdateRequest(BaseModel):
+    max_notional_limit: Optional[float] = Field(None, gt=0)
+    max_margin_limit: Optional[float] = Field(None, gt=0)
+    max_order_notional: Optional[float] = Field(None, gt=0)
+
+
+class KillSwitchUpdateResponse(BaseModel):
+    owner_id: str
+    kill_switch_enabled: bool
+    reason: str
+    updated_at: str
+
+
+class ProviderSlaSummaryResponse(BaseModel):
+    owner_id: str
+    total_lots: int = Field(..., ge=0)
+    pending_lots: int = Field(..., ge=0)
+    ready_lots: int = Field(..., ge=0)
+    completed_lots: int = Field(..., ge=0)
+    failed_lots: int = Field(..., ge=0)
+    success_rate: float = Field(..., ge=0)
+    avg_prepare_seconds: float = Field(..., ge=0)
+    avg_completion_seconds: float = Field(..., ge=0)
+    updated_at: str
+
+
+class TraderExecutionMetricsResponse(BaseModel):
+    owner_id: str
+    futures_orders_submitted: int = Field(..., ge=0)
+    futures_fill_ratio: float = Field(..., ge=0)
+    option_orders_submitted: int = Field(..., ge=0)
+    option_fill_ratio: float = Field(..., ge=0)
+    avg_adverse_slippage_bps: float = Field(..., ge=0)
+    avg_time_to_first_fill_seconds: float = Field(..., ge=0)
+    updated_at: str
+
+
+class StrategyLimitResponse(BaseModel):
+    owner_id: str
+    strategy_tag: str
+    max_order_notional: float = Field(..., gt=0)
+    kill_switch_enabled: bool
+    updated_at: str
+
+
+class StrategyLimitUpdateRequest(BaseModel):
+    strategy_tag: str = Field(..., min_length=1, max_length=64)
+    max_order_notional: float = Field(..., gt=0)
+    kill_switch_enabled: bool = False
+
+
+class StrategyExecutionMetricsRow(BaseModel):
+    strategy_tag: str
+    futures_orders_submitted: int = Field(..., ge=0)
+    option_orders_submitted: int = Field(..., ge=0)
+    futures_fill_ratio: float = Field(..., ge=0)
+    option_fill_ratio: float = Field(..., ge=0)
+    avg_adverse_slippage_bps: float = Field(..., ge=0)
+
+
+class StrategyExecutionMetricsResponse(BaseModel):
+    owner_id: str
+    rows: List[StrategyExecutionMetricsRow]
+    updated_at: str
+
+
+class ProviderExecutionMetricsResponse(BaseModel):
+    owner_id: str
+    lots_observed: int = Field(..., ge=0)
+    on_time_prepare_ratio: float = Field(..., ge=0)
+    on_time_completion_ratio: float = Field(..., ge=0)
+    avg_wall_time_seconds: float = Field(..., ge=0)
+    updated_at: str
+
+
+class ProviderFleetOverviewResponse(BaseModel):
+    owner_id: str
+    nominated_ngh_total: float = Field(..., ge=0)
+    lots_active: int = Field(..., ge=0)
+    lots_completed: int = Field(..., ge=0)
+    utilization_ratio: float = Field(..., ge=0)
+    updated_at: str
+
+
+class ExchangePretradeRequest(BaseModel):
+    product_key: ProductKey
+    side: ExchangeOrderSide
+    price_per_ngh: float = Field(..., gt=0)
+    quantity_ngh: float = Field(..., gt=0)
+    time_in_force: TimeInForce = TimeInForce.GTC
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class OptionPretradeRequest(BaseModel):
+    contract_id: str
+    side: OptionOrderSide
+    limit_price_per_ngh: float = Field(..., gt=0)
+    quantity_ngh: float = Field(..., gt=0)
+    time_in_force: TimeInForce = TimeInForce.GTC
+    subaccount_id: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+
+class PretradeCheckResponse(BaseModel):
+    approved: bool
+    reasons: List[str]
+    estimated_notional: float = Field(..., ge=0)
+    estimated_margin: float = Field(..., ge=0)
+    account_scope: str
+    subaccount_scope: Optional[str] = None
+    risk_snapshot: RiskSummaryResponse
+
+
+class ComputeDeliveryRequest(BaseModel):
+    job_id: str
+    gpu_count: int = Field(..., ge=1, le=4)
+    composite: str = Field(..., min_length=2)
+    deposit_ngh: Optional[float] = Field(None, gt=0)
+
+
+class ComputeDeliveryResponse(BaseModel):
+    position_id: str
+    job_id: str
+    delivered_ngh: float = Field(..., ge=0)
+    remaining_wallet_ngh: float = Field(..., ge=0)
+    factoring_summary: Dict[str, Any]
+    delivery_status: str
+
+
+class ProviderSplitRequest(BaseModel):
+    provider_id: str = Field(..., min_length=1, max_length=64)
+    gpu_count: int = Field(..., ge=1, le=4)
+
+
+class DemoBlockchainAnchorResponse(BaseModel):
+    network_label: str
+    tx_hash: str
+    block_number: Optional[int] = None
+    explorer_url: Optional[str] = None
+
+
+class DemoProviderExecutionResponse(BaseModel):
+    provider_id: str
+    gpu_count: int
+    factoring_summary: Dict[str, Any]
+
+
+class DemoRunRequest(BaseModel):
+    job_id: str
+    composite: str = Field(..., min_length=2)
+    deposit_ngh: Optional[float] = Field(None, gt=0)
+    auto_settle_if_open: bool = True
+    target_settle_seconds: int = Field(300, ge=30, le=3600)
+
+
+class DemoRunResponse(BaseModel):
+    position_id: str
+    job_id: str
+    settlement_status: str
+    settlement_target_seconds: int
+    matched_gpu_count: int = Field(..., ge=1, le=4)
+    delivered_ngh: float = Field(..., ge=0)
+    remaining_wallet_ngh: float = Field(..., ge=0)
+    provider_executions: List[DemoProviderExecutionResponse]
+    provider_selection_policy: str = "best_price_capacity_real_only"
+    real_provider_only: bool = True
+    synthetic_excluded: bool = True
+    verification_passed: bool
+    verification_hash: str
+    blockchain_anchor: DemoBlockchainAnchorResponse
+    run_status: str
+
+
+class DemoProgressStepStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class DemoRunProgressStep(BaseModel):
+    step_id: str
+    label: str
+    status: DemoProgressStepStatus
+    detail: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class DemoRunTrackResponse(BaseModel):
+    run_id: str
+    overall_status: str
+    steps: List[DemoRunProgressStep]
+    job_id: Optional[str] = None
+    position_id: Optional[str] = None
+    result: Optional[DemoRunResponse] = None
+    error: Optional[str] = None
+
+
+class FullDemoRunRequest(BaseModel):
+    composite: str = Field(..., min_length=2)
+    region: Region
+    iso_hour: int = Field(..., ge=0, le=23)
+    sla: SLA
+    tier: Tier
+    quantity_ngh: float = Field(10.0, gt=0)
+    price_per_ngh: float = Field(2.45, gt=0)
+    package_size_ngh: float = Field(10.0, gt=0, le=15.0)
+    job_id: Optional[str] = None
+    gpu_model_label: str = Field("demo-workload", min_length=1, max_length=64)
+    target_settle_seconds: int = Field(300, ge=30, le=3600)
+
+
+class FullDemoRunStartResponse(BaseModel):
+    run_id: str
+
+
+class MarketLiveOverviewRow(BaseModel):
+    gpu_model: str
+    product_key: ProductKey
+    last_price_per_ngh: float = Field(..., ge=0)
+    best_bid_per_ngh: Optional[float] = Field(None, ge=0)
+    best_ask_per_ngh: Optional[float] = Field(None, ge=0)
+    spread_per_ngh: Optional[float] = Field(None, ge=0)
+    traded_volume_ngh_5m: float = Field(..., ge=0)
+    active_order_count: int = Field(..., ge=0)
+
+
+class MarketLiveOverviewResponse(BaseModel):
+    as_of: str
+    rows: List[MarketLiveOverviewRow]
+
+
+class MarketSimulationStartRequest(BaseModel):
+    synthetic_buyer_agents: int = Field(30, ge=1, le=500)
+    synthetic_seller_agents: int = Field(20, ge=1, le=500)
+    ticks_per_second: float = Field(2.0, ge=0.2, le=20.0)
+
+
+class MarketSimulationStatusResponse(BaseModel):
+    running: bool
+    synthetic_buyer_agents: int = Field(..., ge=0)
+    synthetic_seller_agents: int = Field(..., ge=0)
+    ticks_per_second: float = Field(..., ge=0)
+    started_at: Optional[str] = None
+    total_ticks: int = Field(..., ge=0)
+    total_synthetic_orders: int = Field(..., ge=0)
+
+
+class TradingSubaccountRiskResponse(BaseModel):
+    owner_id: str
+    subaccount_id: str
+    max_order_notional: float = Field(..., gt=0)
+    kill_switch_enabled: bool
+    updated_at: str
+
+
+class TradingSubaccountRiskUpdateRequest(BaseModel):
+    subaccount_id: str = Field(..., min_length=1, max_length=64)
+    max_order_notional: float = Field(..., gt=0)
+    kill_switch_enabled: bool = False
+
+
+class TradingHierarchyResponse(BaseModel):
+    owner_id: str
+    org_id: str
+    account_id: str
+    subaccounts: List[TradingSubaccountRiskResponse]
+    updated_at: str
 
 
 class FeasibilityResponse(BaseModel):
@@ -128,6 +829,8 @@ class NominationRequest(BaseModel):
     tier: Tier
     sla: SLA
     ngh_available: float = Field(..., gt=0, description="NGH available for this window")
+    gpu_model: str = Field("RTX 4090", min_length=1, max_length=64)
+    gpu_count: int = Field(1, ge=1, le=64)
 
 
 class NominationResponse(BaseModel):
@@ -139,9 +842,26 @@ class NominationResponse(BaseModel):
     tier: Tier
     sla: SLA
     ngh_available: float
+    gpu_model: str = "RTX 4090"
+    gpu_count: int = 1
+    provider_id: Optional[str] = None
     created_at: str = Field(
         ..., description="Nomination creation timestamp in ISO 8601 format"
     )
+
+
+class MarketplaceGpuListingResponse(BaseModel):
+    listing_id: str
+    provider_id: str
+    gpu_model: str
+    gpu_count: int = Field(..., ge=1)
+    region: Region
+    iso_hour: int = Field(..., ge=0, le=23)
+    tier: Tier
+    sla: SLA
+    ngh_available: float = Field(..., ge=0)
+    indicative_price_per_ngh: float = Field(..., ge=0)
+    created_at: str
 
 
 class LotStatus(str, Enum):

@@ -91,3 +91,6 @@ vite.config.*.timestamp-*
 # Misc
 .cache/
 .temp/
+
+# Local API persistence (dev in-memory store snapshots; do not commit)
+apps/api/app/data/*.json

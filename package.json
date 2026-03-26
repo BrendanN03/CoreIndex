@@ -1,0 +1,9 @@
+{
+  "name": "coreindex-workspace",
+  "private": true,
+  "description": "Run API (8010) + web (5173); override with COREINDEX_DEV_API_PORT / COREINDEX_DEV_WEB_PORT",
+  "scripts": {
+    "dev": "node scripts/dev-stack.mjs",
+    "start": "node scripts/dev-stack.mjs"
+  }
+}

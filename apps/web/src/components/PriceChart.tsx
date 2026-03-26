@@ -1,63 +1,71 @@
 import { Card } from './ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Tabs, TabsList, TabsTrigger } from './ui/tabs';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useState, useEffect } from 'react';
+import { MarketApi } from '../lib/api';
 
 interface PriceChartProps {
   selectedGPU: string;
 }
 
-const generateInitialData = (basePrice: number) => {
-  const data = [];
-  const now = new Date();
-  for (let i = 23; i >= 0; i--) {
-    const time = new Date(now.getTime() - i * 60 * 60 * 1000);
-    data.push({
-      time: time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      price: parseFloat((basePrice + Math.random() * 1 - 0.5).toFixed(2)),
-      volume: Math.floor(Math.random() * 5000 + 10000),
-    });
-  }
-  return data;
-};
-
-const basePrices: { [key: string]: number } = {
-  'RTX 4090': 2.45,
-  'A100': 4.80,
-  'H100': 8.95,
-  'RTX 3090': 1.20,
-};
+type PricePoint = { time: string; price: number; volume: number };
 
 export function PriceChart({ selectedGPU }: PriceChartProps) {
-  const [data, setData] = useState(generateInitialData(basePrices[selectedGPU] || 2.45));
+  const [data, setData] = useState<PricePoint[]>([]);
   const [timeframe, setTimeframe] = useState('24H');
 
   useEffect(() => {
-    setData(generateInitialData(basePrices[selectedGPU] || 2.45));
-  }, [selectedGPU]);
+    let cancelled = false;
+    async function refresh() {
+      const [tape, book] = await Promise.all([
+        MarketApi.getLiveTape({ gpu_model: selectedGPU, limit: 120 }),
+        MarketApi.getLiveOrderBook({ gpu_model: selectedGPU }),
+      ]);
+      if (cancelled) return;
+      const rows = [...tape].reverse().map((trade) => ({
+        time: new Date(trade.created_at).toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+        price: trade.price_per_ngh,
+        volume: trade.quantity_ngh,
+      }));
+      if (rows.length === 0) {
+        const fallback =
+          book.best_bid != null && book.best_ask != null
+            ? (book.best_bid + book.best_ask) / 2
+            : (book.best_bid ?? book.best_ask ?? 0);
+        if (fallback > 0) {
+          rows.push({
+            time: new Date().toLocaleTimeString('en-US', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+            price: Number(fallback.toFixed(2)),
+            volume: 0,
+          });
+        }
+      }
+      setData(rows.slice(-80));
+    }
 
-  useEffect(() => {
+    void refresh().catch(() => undefined);
     const interval = setInterval(() => {
-      setData(prev => {
-        const newData = [...prev.slice(1)];
-        const lastPrice = prev[prev.length - 1].price;
-        const now = new Date();
-        newData.push({
-          time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          price: parseFloat((lastPrice + (Math.random() - 0.5) * 0.2).toFixed(2)),
-          volume: Math.floor(Math.random() * 5000 + 10000),
-        });
-        return newData;
-      });
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
+      void refresh().catch(() => undefined);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [selectedGPU]);
 
   const currentPrice = data[data.length - 1]?.price || 0;
   const previousPrice = data[0]?.price || 0;
   const priceChange = currentPrice - previousPrice;
-  const percentChange = ((priceChange / previousPrice) * 100).toFixed(2);
+  const percentChange =
+    previousPrice > 0 ? ((priceChange / previousPrice) * 100).toFixed(2) : '0.00';
 
   return (
     <Card className="bg-slate-900 border-slate-800 p-6">

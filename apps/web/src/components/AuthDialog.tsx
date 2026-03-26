@@ -106,9 +106,18 @@ export function AuthDialog({ onLoggedIn }: Props) {
           </TabsList>
 
           <TabsContent value="login" className="mt-4 space-y-3">
+            <form
+              className="space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (canSubmit && !isBusy) void handleLogin();
+              }}
+            >
             <div className="space-y-2">
               <div className="text-xs text-slate-400">Email</div>
               <Input
+                type="email"
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
@@ -119,6 +128,7 @@ export function AuthDialog({ onLoggedIn }: Props) {
               <div className="text-xs text-slate-400">Password</div>
               <Input
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
@@ -133,18 +143,28 @@ export function AuthDialog({ onLoggedIn }: Props) {
             ) : null}
 
             <Button
+              type="submit"
               className="w-full bg-blue-600 hover:bg-blue-700"
               disabled={isBusy || !canSubmit}
-              onClick={() => void handleLogin()}
             >
               {isBusy ? 'Working…' : 'Login'}
             </Button>
+            </form>
           </TabsContent>
 
           <TabsContent value="register" className="mt-4 space-y-3">
+            <form
+              className="space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (canSubmit && !isBusy) void handleRegister();
+              }}
+            >
             <div className="space-y-2">
               <div className="text-xs text-slate-400">Email</div>
               <Input
+                type="email"
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
@@ -193,12 +213,13 @@ export function AuthDialog({ onLoggedIn }: Props) {
             ) : null}
 
             <Button
+              type="submit"
               className="w-full bg-blue-600 hover:bg-blue-700"
               disabled={isBusy || !canSubmit}
-              onClick={() => void handleRegister()}
             >
               {isBusy ? 'Working…' : 'Create account'}
             </Button>
+            </form>
           </TabsContent>
         </Tabs>
       </DialogContent>

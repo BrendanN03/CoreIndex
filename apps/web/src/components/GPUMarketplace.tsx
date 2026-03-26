@@ -3,121 +3,14 @@ import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Input } from './ui/input';
-import { Server, MapPin, Zap, TrendingUp, Search } from 'lucide-react';
-import { useState } from 'react';
-import { JobApi, type JobCreateRequestDto } from '../lib/api';
-
-interface GPUListing {
-  id: string;
-  name: string;
-  vram: string;
-  location: string;
-  region: string;
-  price: number;
-  availability: number;
-  performance: string;
-  change: number;
-  provider: string;
-}
-
-const gpuListings: GPUListing[] = [
-  {
-    id: '1',
-    name: 'RTX 4090',
-    vram: '24GB',
-    location: 'US-East',
-    region: 'Virginia',
-    price: 2.45,
-    availability: 87,
-    performance: '82.6 TFLOPS',
-    change: 5.2,
-    provider: 'AWS'
-  },
-  {
-    id: '2',
-    name: 'A100',
-    vram: '80GB',
-    location: 'US-West',
-    region: 'Oregon',
-    price: 4.80,
-    availability: 34,
-    performance: '312 TFLOPS',
-    change: -2.1,
-    provider: 'GCP'
-  },
-  {
-    id: '3',
-    name: 'H100',
-    vram: '80GB',
-    location: 'EU-Central',
-    region: 'Frankfurt',
-    price: 8.95,
-    availability: 12,
-    performance: '1000 TFLOPS',
-    change: 12.3,
-    provider: 'Azure'
-  },
-  {
-    id: '4',
-    name: 'RTX 3090',
-    vram: '24GB',
-    location: 'US-East',
-    region: 'N. Virginia',
-    price: 1.20,
-    availability: 156,
-    performance: '35.6 TFLOPS',
-    change: 3.5,
-    provider: 'Lambda'
-  },
-  {
-    id: '5',
-    name: 'RTX 4090',
-    vram: '24GB',
-    location: 'Asia-Pacific',
-    region: 'Singapore',
-    price: 2.65,
-    availability: 45,
-    performance: '82.6 TFLOPS',
-    change: 4.8,
-    provider: 'AWS'
-  },
-  {
-    id: '6',
-    name: 'A100',
-    vram: '80GB',
-    location: 'EU-West',
-    region: 'Ireland',
-    price: 4.95,
-    availability: 28,
-    performance: '312 TFLOPS',
-    change: -1.5,
-    provider: 'GCP'
-  },
-  {
-    id: '7',
-    name: 'RTX 3090',
-    vram: '24GB',
-    location: 'EU-Central',
-    region: 'Frankfurt',
-    price: 1.35,
-    availability: 92,
-    performance: '35.6 TFLOPS',
-    change: 2.1,
-    provider: 'Vast.ai'
-  },
-  {
-    id: '8',
-    name: 'H100',
-    vram: '80GB',
-    location: 'US-West',
-    region: 'California',
-    price: 9.20,
-    availability: 8,
-    performance: '1000 TFLOPS',
-    change: 15.2,
-    provider: 'Azure'
-  },
-];
+import { Server, MapPin, Zap, Search } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  JobApi,
+  ProviderApi,
+  type JobCreateRequestDto,
+  type MarketplaceGpuListingResponseDto,
+} from '../lib/api';
 
 interface GPUMarketplaceProps {
   onSelectGPU: (gpu: string) => void;
@@ -128,26 +21,59 @@ interface GPUMarketplaceProps {
 
 export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMarketplaceProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState('price');
-   const [status, setStatus] = useState<string | null>(null);
-   const [isCreating, setIsCreating] = useState(false);
+  const [regionFilter, setRegionFilter] = useState<'all' | 'us' | 'eu' | 'asia'>('all');
+  const [sortBy, setSortBy] = useState<'price' | 'availability'>('price');
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [listings, setListings] = useState<MarketplaceGpuListingResponseDto[]>([]);
 
-  const filteredListings = gpuListings
-    .filter(gpu => 
-      gpu.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      gpu.location.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      gpu.provider.toLowerCase().includes(searchQuery.toLowerCase())
-    )
-    .sort((a, b) => {
-      if (sortBy === 'price') return a.price - b.price;
-      if (sortBy === 'performance') return parseFloat(b.performance) - parseFloat(a.performance);
-      if (sortBy === 'availability') return b.availability - a.availability;
-      return 0;
-    });
+  async function refreshListings() {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const rows = await ProviderApi.getListings();
+      setListings(rows);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setListings([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
-  async function handleConnectClick(gpu: GPUListing) {
-    onSelectGPU(gpu.name);
+  useEffect(() => {
+    void refreshListings();
+  }, []);
+
+  const filteredListings = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const regionMatches = (row: MarketplaceGpuListingResponseDto) => {
+      if (regionFilter === 'all') return true;
+      if (regionFilter === 'us') return row.region.startsWith('us-');
+      if (regionFilter === 'eu') return row.region.startsWith('eu-');
+      return row.region.startsWith('asia-');
+    };
+    return listings
+      .filter((row) => regionMatches(row))
+      .filter(
+        (row) =>
+          !q ||
+          row.gpu_model.toLowerCase().includes(q) ||
+          row.provider_id.toLowerCase().includes(q) ||
+          row.region.toLowerCase().includes(q),
+      )
+      .sort((a, b) => {
+        if (sortBy === 'price') return a.indicative_price_per_ngh - b.indicative_price_per_ngh;
+        return b.ngh_available - a.ngh_available;
+      });
+  }, [listings, searchQuery, regionFilter, sortBy]);
+
+  async function handleConnectClick(gpu: MarketplaceGpuListingResponseDto) {
+    onSelectGPU(gpu.gpu_model);
     setStatus(null);
+    setError(null);
     setIsCreating(true);
 
     try {
@@ -157,27 +83,20 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
       const body: JobCreateRequestDto = {
         job_id: `job-${Date.now()}`,
         window: {
-          // Map UI regions into the backend enum values.
-          // For now, use a simple heuristic based on the listing location.
-          region: gpu.location.toLowerCase().includes('asia')
-            ? 'asia-pacific'
-            : gpu.location.toLowerCase().includes('eu')
-            ? 'eu-central'
-            : gpu.location.toLowerCase().includes('west')
-            ? 'us-west'
-            : 'us-east',
-          iso_hour: utcHour,
-          sla: 'standard',
-          tier: 'standard',
+          region: gpu.region,
+          iso_hour: gpu.iso_hour ?? utcHour,
+          sla: gpu.sla,
+          tier: gpu.tier,
         },
         package_index: [
           {
             package_id: `pkg-${Date.now()}`,
-            size_estimate_ngh: 10,
+            size_estimate_ngh: Math.max(1, Math.min(10, gpu.ngh_available)),
             first_output_estimate_seconds: 60,
             metadata: {
-              gpu_name: gpu.name,
-              provider: gpu.provider,
+              gpu_name: gpu.gpu_model,
+              provider: gpu.provider_id,
+              listing_id: gpu.listing_id,
             },
           },
         ],
@@ -195,8 +114,8 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
       );
       onJobCreated?.();
     } catch (err) {
-      console.error(err);
-      setStatus('Failed to create demo job or fetch feasibility. See console for details.');
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus('Failed to create job from selected provider listing.');
     } finally {
       setIsCreating(false);
     }
@@ -205,7 +124,7 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
   return (
     <Card className="bg-slate-900 border-slate-800 p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-slate-100">Available GPU Compute</h2>
+        <h2 className="text-slate-100">Available GPU Compute (Live Seller Listings)</h2>
         <div className="flex gap-2">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -216,16 +135,25 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
               className="pl-9 bg-slate-800 border-slate-700 w-64"
             />
           </div>
+          <Button
+            variant="outline"
+            className="bg-slate-800 border-slate-700"
+            onClick={() => void refreshListings()}
+            disabled={isLoading}
+          >
+            {isLoading ? 'Refreshing...' : 'Refresh'}
+          </Button>
         </div>
       </div>
 
-      <Tabs defaultValue="all" className="mb-4">
+      <Tabs value={regionFilter} onValueChange={(v) => setRegionFilter(v as 'all' | 'us' | 'eu' | 'asia')} className="mb-4">
         <TabsList className="bg-slate-800">
           <TabsTrigger value="all">All Regions</TabsTrigger>
           <TabsTrigger value="us">US</TabsTrigger>
           <TabsTrigger value="eu">EU</TabsTrigger>
           <TabsTrigger value="asia">Asia</TabsTrigger>
         </TabsList>
+        <TabsContent value={regionFilter} />
       </Tabs>
 
       <div className="flex gap-2 mb-4">
@@ -238,14 +166,6 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
           Price
         </Button>
         <Button 
-          variant={sortBy === 'performance' ? 'default' : 'outline'} 
-          size="sm"
-          onClick={() => setSortBy('performance')}
-          className={sortBy !== 'performance' ? 'bg-slate-800 border-slate-700' : ''}
-        >
-          Performance
-        </Button>
-        <Button 
           variant={sortBy === 'availability' ? 'default' : 'outline'} 
           size="sm"
           onClick={() => setSortBy('availability')}
@@ -255,13 +175,23 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
         </Button>
       </div>
 
-      <div className="space-y-3 max-h-[600px] overflow-y-auto">
+      <div className="space-y-3 max-h-[min(22rem,45vh)] overflow-y-auto overscroll-contain pr-1">
+        {error ? (
+          <div className="rounded-lg border border-red-900/40 bg-red-950/30 p-3 text-sm text-red-200">
+            {error}
+          </div>
+        ) : null}
+        {!isLoading && filteredListings.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
+            No seller listings yet. Ask provider accounts to submit nominations first.
+          </div>
+        ) : null}
         {filteredListings.map((gpu) => (
           <div
-            key={gpu.id}
-            onClick={() => onSelectGPU(gpu.name)}
+            key={gpu.listing_id}
+            onClick={() => onSelectGPU(gpu.gpu_model)}
             className={`p-4 rounded-lg border transition-all cursor-pointer ${
-              selectedGPU === gpu.name
+              selectedGPU === gpu.gpu_model
                 ? 'bg-blue-950/30 border-blue-700'
                 : 'bg-slate-800/50 border-slate-700 hover:border-slate-600'
             }`}
@@ -273,31 +203,26 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="text-slate-100">{gpu.name}</span>
+                    <span className="text-slate-100">{gpu.gpu_model}</span>
                     <Badge variant="outline" className="border-slate-600">
-                      {gpu.vram}
+                      {gpu.gpu_count} GPU
                     </Badge>
                   </div>
                   <div className="flex items-center gap-4 mt-1 text-sm text-slate-400">
                     <div className="flex items-center gap-1">
                       <MapPin className="w-3 h-3" />
-                      {gpu.location} • {gpu.region}
+                      {gpu.region} • {gpu.iso_hour}h • {gpu.sla}
                     </div>
                     <div className="flex items-center gap-1">
                       <Zap className="w-3 h-3" />
-                      {gpu.performance}
+                      {gpu.ngh_available.toFixed(2)} NGH
                     </div>
                   </div>
                 </div>
               </div>
               <div className="text-right">
-                <div className="text-xl">${gpu.price}/hr</div>
-                <div className={`text-sm flex items-center gap-1 justify-end ${
-                  gpu.change >= 0 ? 'text-green-500' : 'text-red-500'
-                }`}>
-                  <TrendingUp className={`w-3 h-3 ${gpu.change < 0 ? 'rotate-180' : ''}`} />
-                  {Math.abs(gpu.change)}%
-                </div>
+                <div className="text-xl">${gpu.indicative_price_per_ngh.toFixed(2)}/NGH</div>
+                <div className="text-xs text-slate-500">{gpu.created_at}</div>
               </div>
             </div>
 
@@ -305,11 +230,11 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
               <div className="flex items-center gap-4">
                 <div>
                   <div className="text-xs text-slate-400">Provider</div>
-                  <div className="text-sm text-slate-100">{gpu.provider}</div>
+                  <div className="text-sm text-slate-100">{gpu.provider_id}</div>
                 </div>
                 <div>
                   <div className="text-xs text-slate-400">Available</div>
-                  <div className="text-sm text-slate-100">{gpu.availability} units</div>
+                  <div className="text-sm text-slate-100">{gpu.ngh_available.toFixed(2)} NGH</div>
                 </div>
               </div>
               <Button

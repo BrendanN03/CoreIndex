@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.v1.endpoints.auth import get_current_user_optional
 from app.repositories.memory.storage import storage
@@ -9,11 +9,13 @@ from app.schemas.models import (
     JobCreateRequest,
     JobResponse,
     JobStatus,
+    ProductKey,
     RelayLink,
 )
 from app.services.feasibility import (
     calculate_earliest_start,
     calculate_ngh_required,
+    calculate_job_voucher_gap,
     calculate_voucher_gap,
     check_milestone_sanity,
 )
@@ -50,14 +52,17 @@ def create_job(
 
 
 @router.get("/jobs", response_model=List[JobResponse])
-def list_jobs(user=Depends(get_current_user_optional)):
+def list_jobs(
+    user=Depends(get_current_user_optional),
+    limit: int = Query(120, ge=1, le=500, description="Max jobs to return (newest first)"),
+):
     """
     List jobs (newest first).
     If the request includes a valid Bearer token, only that user's jobs are returned.
     Otherwise all jobs are returned (for demo/backward compatibility).
     """
     created_by = user.user_id if user else None
-    return storage.list_jobs(created_by=created_by)
+    return storage.list_jobs(created_by=created_by, limit=limit)
 
 
 @router.get("/jobs/{job_id}/feasibility", response_model=FeasibilityResponse)
@@ -81,8 +86,14 @@ def get_job_feasibility(job_id: str, key: Optional[str] = None):
     ngh_required = calculate_ngh_required(job.package_index)
     earliest_start = calculate_earliest_start(job.package_index, job.window)
 
-    voucher_key = key or job_id
-    voucher_gap = calculate_voucher_gap(ngh_required, voucher_key)
+    if key:
+        voucher_gap = calculate_voucher_gap(ngh_required, key)
+    else:
+        voucher_gap = calculate_job_voucher_gap(
+            ngh_required,
+            job.job_id,
+            ProductKey.from_window(job.window),
+        )
 
     milestone_sanity = check_milestone_sanity(job.package_index)
 

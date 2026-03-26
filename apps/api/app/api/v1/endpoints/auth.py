@@ -15,10 +15,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -87,10 +90,71 @@ class AuthStorage:
     """
 
     def __init__(self, *, token_ttl_hours: int = 24):
+        self._state_file = Path(__file__).resolve().parents[3] / "data" / "auth_state.json"
         self._users_by_email: Dict[str, _UserRow] = {}
         self._users_by_id: Dict[str, _UserRow] = {}
         self._sessions_by_token: Dict[str, _SessionRow] = {}
         self._token_ttl = timedelta(hours=token_ttl_hours)
+        self._lock = threading.RLock()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self._state_file.exists():
+            return
+        try:
+            raw = json.loads(self._state_file.read_text())
+        except Exception:
+            return
+
+        for item in raw.get("users", []):
+            row = _UserRow(
+                user_id=item["user_id"],
+                email=item["email"],
+                display_name=item.get("display_name"),
+                role=item["role"],
+                password_hash=item["password_hash"],
+                created_at=item["created_at"],
+            )
+            self._users_by_email[row.email] = row
+            self._users_by_id[row.user_id] = row
+
+        for item in raw.get("sessions", []):
+            try:
+                expires_at = datetime.fromisoformat(item["expires_at"])
+            except Exception:
+                continue
+            row = _SessionRow(
+                token=item["token"],
+                user_id=item["user_id"],
+                expires_at=expires_at,
+            )
+            self._sessions_by_token[row.token] = row
+
+    def _persist_state(self) -> None:
+        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            payload = {
+                "users": [
+                    {
+                        "user_id": row.user_id,
+                        "email": row.email,
+                        "display_name": row.display_name,
+                        "role": row.role,
+                        "password_hash": row.password_hash,
+                        "created_at": row.created_at,
+                    }
+                    for row in list(self._users_by_id.values())
+                ],
+                "sessions": [
+                    {
+                        "token": row.token,
+                        "user_id": row.user_id,
+                        "expires_at": row.expires_at.isoformat(),
+                    }
+                    for row in list(self._sessions_by_token.values())
+                ],
+            }
+            self._state_file.write_text(json.dumps(payload, indent=2))
 
     # ---- users ----
     def create_user(
@@ -102,25 +166,27 @@ class AuthStorage:
         role: Literal["buyer", "seller"],
     ) -> _UserRow:
         email_key = email.strip().lower()
-        if email_key in self._users_by_email:
-            raise ValueError("email_already_registered")
+        with self._lock:
+            if email_key in self._users_by_email:
+                raise ValueError("email_already_registered")
 
-        if role not in ("buyer", "seller"):
-            raise ValueError("invalid_role")
+            if role not in ("buyer", "seller"):
+                raise ValueError("invalid_role")
 
-        user_id = str(uuid.uuid4())
-        password_hash = _hash_password(password)
-        created_at = _utc_now().isoformat()
-        row = _UserRow(
-            user_id=user_id,
-            email=email_key,
-            display_name=display_name,
-            role=role,
-            password_hash=password_hash,
-            created_at=created_at,
-        )
-        self._users_by_email[email_key] = row
-        self._users_by_id[user_id] = row
+            user_id = str(uuid.uuid4())
+            password_hash = _hash_password(password)
+            created_at = _utc_now().isoformat()
+            row = _UserRow(
+                user_id=user_id,
+                email=email_key,
+                display_name=display_name,
+                role=role,
+                password_hash=password_hash,
+                created_at=created_at,
+            )
+            self._users_by_email[email_key] = row
+            self._users_by_id[user_id] = row
+        self._persist_state()
         return row
 
     def get_user_by_email(self, email: str) -> Optional[_UserRow]:
@@ -131,19 +197,25 @@ class AuthStorage:
 
     # ---- sessions ----
     def create_session(self, user_id: str) -> _SessionRow:
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + self._token_ttl
-        row = _SessionRow(token=token, user_id=user_id, expires_at=expires_at)
-        self._sessions_by_token[token] = row
+        with self._lock:
+            token = secrets.token_urlsafe(32)
+            expires_at = datetime.now(timezone.utc) + self._token_ttl
+            row = _SessionRow(token=token, user_id=user_id, expires_at=expires_at)
+            self._sessions_by_token[token] = row
+        self._persist_state()
         return row
 
     def get_session(self, token: str) -> Optional[_SessionRow]:
-        row = self._sessions_by_token.get(token)
-        if not row:
-            return None
-        if datetime.now(timezone.utc) >= row.expires_at:
-            # expire lazily
-            self._sessions_by_token.pop(token, None)
+        expired = False
+        with self._lock:
+            row = self._sessions_by_token.get(token)
+            if not row:
+                return None
+            if datetime.now(timezone.utc) >= row.expires_at:
+                self._sessions_by_token.pop(token, None)
+                expired = True
+        if expired:
+            self._persist_state()
             return None
         return row
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import List
 
-from app.schemas.models import PackageDescriptor, Window
+from app.schemas.models import PackageDescriptor, ProductKey, Window
 from app.repositories.memory.storage import storage
 
 
@@ -55,6 +55,13 @@ def calculate_voucher_gap(ngh_required: float, key: str) -> float:
     voucher_balance = storage.get_voucher_balance(key)
     gap = ngh_required - voucher_balance
     return max(0.0, gap)  # Gap cannot be negative
+
+
+def calculate_job_voucher_gap(ngh_required: float, job_id: str, product_key: ProductKey) -> float:
+    """Calculate voucher gap for vouchers escrowed to a specific job."""
+    deposited = storage.get_deposited_voucher_balance(job_id, product_key.as_storage_key())
+    gap = ngh_required - deposited
+    return max(0.0, gap)
 
 
 def check_milestone_sanity(packages: List[PackageDescriptor]) -> dict:

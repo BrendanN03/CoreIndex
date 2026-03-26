@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -10,7 +10,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from './ui/select';
-import { ProviderApi, type WindowDto } from '../lib/api';
+import {
+  ProviderApi,
+  type ProviderExecutionMetricsResponseDto,
+  type ProviderFleetOverviewResponseDto,
+  type ProviderSlaSummaryResponseDto,
+  type WindowDto,
+} from '../lib/api';
 import { MyLots } from './MyLots';
 
 type Region = WindowDto['region'];
@@ -32,6 +38,8 @@ export function ProviderSim() {
   const [tier, setTier] = useState<Tier>('standard');
 
   const [nghAvailable, setNghAvailable] = useState<number>(30);
+  const [gpuModel, setGpuModel] = useState<string>('RTX 4090');
+  const [gpuCount, setGpuCount] = useState<number>(2);
   const [jobId, setJobId] = useState<string>('');
   const [lotId, setLotId] = useState<string>('');
 
@@ -39,6 +47,11 @@ export function ProviderSim() {
   const [lastResponse, setLastResponse] = useState<unknown>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lotsRefreshTrigger, setLotsRefreshTrigger] = useState(0);
+  const [slaSummary, setSlaSummary] = useState<ProviderSlaSummaryResponseDto | null>(null);
+  const [executionMetrics, setExecutionMetrics] = useState<ProviderExecutionMetricsResponseDto | null>(
+    null,
+  );
+  const [fleetOverview, setFleetOverview] = useState<ProviderFleetOverviewResponseDto | null>(null);
 
   const windowDto: WindowDto = useMemo(
     () => ({
@@ -56,6 +69,14 @@ export function ProviderSim() {
     try {
       const res = await fn();
       setLastResponse(res);
+      const [nextSla, nextExec, nextFleet] = await Promise.all([
+        ProviderApi.getSlaSummary(),
+        ProviderApi.getExecutionMetrics(),
+        ProviderApi.getFleetOverview(),
+      ]);
+      setSlaSummary(nextSla);
+      setExecutionMetrics(nextExec);
+      setFleetOverview(nextFleet);
       return res;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -67,16 +88,96 @@ export function ProviderSim() {
     }
   }
 
+  useEffect(() => {
+    void Promise.all([
+      ProviderApi.getSlaSummary(),
+      ProviderApi.getExecutionMetrics(),
+      ProviderApi.getFleetOverview(),
+    ])
+      .then(([slaRes, execRes, fleetRes]) => {
+        setSlaSummary(slaRes);
+        setExecutionMetrics(execRes);
+        setFleetOverview(fleetRes);
+      })
+      .catch((e) => setLastError(e instanceof Error ? e.message : String(e)));
+  }, [lotsRefreshTrigger]);
+
   return (
     <div className="space-y-6">
       <MyLots refreshTrigger={lotsRefreshTrigger} />
 
       <Card className="bg-slate-900 border-slate-800 p-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-slate-100">Provider SLA Dashboard</h3>
+          <Button
+            variant="outline"
+            className="bg-slate-800 border-slate-700"
+            onClick={() =>
+              void Promise.all([
+                ProviderApi.getSlaSummary(),
+                ProviderApi.getExecutionMetrics(),
+                ProviderApi.getFleetOverview(),
+              ])
+                .then(([slaRes, execRes, fleetRes]) => {
+                  setSlaSummary(slaRes);
+                  setExecutionMetrics(execRes);
+                  setFleetOverview(fleetRes);
+                })
+                .catch((e) => setLastError(e instanceof Error ? e.message : String(e)))
+            }
+          >
+            Refresh SLA
+          </Button>
+        </div>
+        {slaSummary ? (
+          <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-4 text-sm">
+            <div className="rounded border border-slate-800 bg-slate-950/40 p-3">
+              <div className="text-slate-500 text-xs uppercase">Lots</div>
+              <div className="text-slate-100 mt-1">{slaSummary.total_lots}</div>
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950/40 p-3">
+              <div className="text-slate-500 text-xs uppercase">Success Rate</div>
+              <div className="text-emerald-300 mt-1">
+                {(slaSummary.success_rate * 100).toFixed(1)}%
+              </div>
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950/40 p-3">
+              <div className="text-slate-500 text-xs uppercase">Avg Prepare</div>
+              <div className="text-slate-100 mt-1">{slaSummary.avg_prepare_seconds.toFixed(1)}s</div>
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950/40 p-3">
+              <div className="text-slate-500 text-xs uppercase">Avg Completion</div>
+              <div className="text-slate-100 mt-1">
+                {slaSummary.avg_completion_seconds.toFixed(1)}s
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 text-sm text-slate-400">SLA metrics will appear after first lot activity.</div>
+        )}
+        {executionMetrics ? (
+          <div className="mt-4 rounded border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-300">
+            <div>On-time prepare: {(executionMetrics.on_time_prepare_ratio * 100).toFixed(1)}%</div>
+            <div>On-time completion: {(executionMetrics.on_time_completion_ratio * 100).toFixed(1)}%</div>
+            <div>Average wall time: {executionMetrics.avg_wall_time_seconds.toFixed(1)}s</div>
+          </div>
+        ) : null}
+        {fleetOverview ? (
+          <div className="mt-4 rounded border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-300">
+            <div>Nominated capacity: {fleetOverview.nominated_ngh_total.toFixed(2)} NGH</div>
+            <div>Active lots: {fleetOverview.lots_active}</div>
+            <div>Completed lots: {fleetOverview.lots_completed}</div>
+            <div>Utilization: {(fleetOverview.utilization_ratio * 100).toFixed(1)}%</div>
+          </div>
+        ) : null}
+      </Card>
+
+      <Card className="bg-slate-900 border-slate-800 p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-slate-100">Provider (Simulated)</h2>
+            <h2 className="text-slate-100">Provider Operations Desk</h2>
             <p className="text-slate-400 text-sm">
-              Drive provider-side API calls without any GPUs. This hits{' '}
+              Operate nominations and lot lifecycle from the provider side. This hits{' '}
               <Badge variant="outline" className="border-slate-700 text-slate-200">
                 /nominations
               </Badge>{' '}
@@ -84,7 +185,7 @@ export function ProviderSim() {
               <Badge variant="outline" className="border-slate-700 text-slate-200">
                 /lots
               </Badge>{' '}
-              endpoints directly.
+              endpoints directly and mirrors the execution workflow.
             </p>
           </div>
           <Button
@@ -161,6 +262,23 @@ export function ProviderSim() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
           <Card className="bg-slate-950/40 border-slate-800 p-4">
             <div className="text-slate-200 mb-3">1) Nominate capacity</div>
+            <div className="text-xs text-slate-400 mb-2">GPU model</div>
+            <Input
+              value={gpuModel}
+              onChange={(e) => setGpuModel(e.target.value)}
+              className="bg-slate-800 border-slate-700"
+              placeholder="RTX 4090"
+            />
+            <div className="text-xs text-slate-400 mt-2 mb-2">GPU count</div>
+            <Input
+              type="number"
+              min={1}
+              max={64}
+              step={1}
+              value={gpuCount}
+              onChange={(e) => setGpuCount(Number(e.target.value))}
+              className="bg-slate-800 border-slate-700"
+            />
             <div className="text-xs text-slate-400 mb-2">NGH available</div>
             <Input
               type="number"
@@ -178,6 +296,8 @@ export function ProviderSim() {
                   ProviderApi.createNomination({
                     ...windowDto,
                     ngh_available: nghAvailable,
+                    gpu_model: gpuModel.trim() || 'RTX 4090',
+                    gpu_count: gpuCount,
                   }),
                 )
               }

@@ -11,6 +11,10 @@ import { Button } from './components/ui/button';
 import { AuthApi, type UserPublicDto } from './lib/api';
 import { Card } from './components/ui/card';
 import { MyJobs } from './components/MyJobs';
+import { PlatformPhasePanel } from './components/PlatformPhasePanel';
+import { MarketPhaseOnePanel } from './components/MarketPhaseOnePanel';
+import { OptionsPanel } from './components/OptionsPanel';
+import { PortfolioBlotter } from './components/PortfolioBlotter';
 
 export default function App() {
   const [selectedGPU, setSelectedGPU] = useState('RTX 4090');
@@ -115,8 +119,10 @@ export default function App() {
 
       {/* Main Content */}
       <div className="container mx-auto px-4 py-6">
+        <PlatformPhasePanel signedIn={signedIn} role={user?.role ?? null} />
+
         {!signedIn ? (
-          <Card className="bg-slate-900 border-slate-800 p-6">
+          <Card className="mt-6 bg-slate-900 border-slate-800 p-6">
             <h2 className="text-slate-100">Sign in to continue</h2>
             <p className="text-slate-400 text-sm mt-2">
               Register as a <span className="text-slate-200">buyer</span> to see the buyer demo UI,
@@ -124,7 +130,7 @@ export default function App() {
             </p>
           </Card>
         ) : (
-          <Tabs defaultValue={homeTab} className="w-full">
+          <Tabs defaultValue={homeTab} className="mt-6 w-full">
             <TabsList className="bg-slate-900 border border-slate-800">
               {user?.role === 'buyer' ? (
                 <TabsTrigger value="buyer">Buyer (demo)</TabsTrigger>
@@ -134,30 +140,51 @@ export default function App() {
             </TabsList>
 
             <TabsContent value="buyer" className="mt-6">
-              <MyJobs refreshTrigger={jobsRefreshTrigger} />
+              <Tabs defaultValue="futures" className="w-full">
+                <TabsList className="bg-slate-900 border border-slate-800">
+                  <TabsTrigger value="futures">Futures Desk (primary)</TabsTrigger>
+                  <TabsTrigger value="options">Options Desk</TabsTrigger>
+                  <TabsTrigger value="advanced">Advanced Market View</TabsTrigger>
+                </TabsList>
 
-              {/* Market Overview + GPU list: same vertical spacing (mt-6) as between chart and GPU list */}
-              <div className="mt-6">
-                <MarketOverview />
+                <TabsContent value="futures" className="mt-6 space-y-6">
+                  <Card className="bg-slate-900 border-slate-800 p-4">
+                    <div className="text-slate-100">Quick Start</div>
+                    <div className="mt-2 text-sm text-slate-400">
+                      Easiest: open Physical Delivery Funding and use <span className="text-slate-200">Run entire demo (one click)</span>
+                      (live step progress). Or create a job from the marketplace, buy exposure, then Run Full Demo Flow on a position.
+                    </div>
+                  </Card>
 
-                {/* Main Trading Interface */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
-                {/* Left Column - Chart & Marketplace */}
-                <div className="lg:col-span-2 space-y-6">
-                  <PriceChart selectedGPU={selectedGPU} />
                   <GPUMarketplace
                     onSelectGPU={setSelectedGPU}
                     selectedGPU={selectedGPU}
                     onJobCreated={() => setJobsRefreshTrigger((k) => k + 1)}
                   />
-                </div>
 
-                {/* Right Column - Order Book */}
-                <div className="lg:col-span-1">
-                  <OrderBook selectedGPU={selectedGPU} />
-                </div>
-                </div>
-              </div>
+                  <MyJobs refreshTrigger={jobsRefreshTrigger} />
+
+                  <MarketPhaseOnePanel selectedGPU={selectedGPU} />
+
+                  <PortfolioBlotter />
+                </TabsContent>
+
+                <TabsContent value="options" className="mt-6 space-y-6">
+                  <OptionsPanel selectedGPU={selectedGPU} />
+                </TabsContent>
+
+                <TabsContent value="advanced" className="mt-6 space-y-6">
+                  <MarketOverview />
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                    <div className="space-y-6 lg:col-span-2">
+                      <PriceChart selectedGPU={selectedGPU} />
+                    </div>
+                    <div className="lg:col-span-1">
+                      <OrderBook selectedGPU={selectedGPU} />
+                    </div>
+                  </div>
+                </TabsContent>
+              </Tabs>
             </TabsContent>
 
             <TabsContent value="provider" className="mt-6">

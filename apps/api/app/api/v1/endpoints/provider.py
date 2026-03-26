@@ -9,6 +9,10 @@ from app.schemas.models import (
     LotCreateRequest,
     NominationRequest,
     NominationResponse,
+    MarketplaceGpuListingResponse,
+    ProviderSlaSummaryResponse,
+    ProviderExecutionMetricsResponse,
+    ProviderFleetOverviewResponse,
     PrepareReadyRequest,
     PrepareReadyResponse,
     ResultRequest,
@@ -33,12 +37,24 @@ def list_lots(user=Depends(get_current_user_optional)):
 @router.post(
     "/nominations", response_model=NominationResponse, status_code=status.HTTP_201_CREATED
 )
-def create_nomination(request: NominationRequest):
+def create_nomination(
+    request: NominationRequest,
+    user=Depends(get_current_user_optional),
+):
     """
     Provider endpoint: Declare NGH availability per (region, hour, tier, SLA).
     """
-    nomination = storage.create_nomination(request)
+    provider_id = user.user_id if user else None
+    nomination = storage.create_nomination_for_provider(request, provider_id=provider_id)
     return nomination
+
+
+@router.get("/provider/listings", response_model=List[MarketplaceGpuListingResponse])
+def list_provider_marketplace_listings():
+    """
+    Buyer-facing endpoint: live GPU listings sourced from provider nominations.
+    """
+    return storage.list_marketplace_listings()
 
 
 @router.post("/lots", response_model=Lot, status_code=status.HTTP_201_CREATED)
@@ -127,4 +143,22 @@ def submit_result(lot_id: str, request: ResultRequest):
         logs_uri=request.logs_uri,
         completed_at=updated_lot.completed_at or "",
     )
+
+
+@router.get("/provider/sla", response_model=ProviderSlaSummaryResponse)
+def get_provider_sla(user=Depends(get_current_user_optional)):
+    owner_id = user.user_id if user else None
+    return storage.get_provider_sla_summary(owner_id)
+
+
+@router.get("/provider/execution-metrics", response_model=ProviderExecutionMetricsResponse)
+def get_provider_execution_metrics(user=Depends(get_current_user_optional)):
+    owner_id = user.user_id if user else None
+    return storage.get_provider_execution_metrics(owner_id)
+
+
+@router.get("/provider/fleet", response_model=ProviderFleetOverviewResponse)
+def get_provider_fleet(user=Depends(get_current_user_optional)):
+    owner_id = user.user_id if user else None
+    return storage.get_provider_fleet_overview(owner_id)
 
