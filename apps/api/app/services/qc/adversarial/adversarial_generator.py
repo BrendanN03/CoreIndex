@@ -38,7 +38,8 @@ def _perturb_floats(rows: List[Dict[str, Any]], factor: float) -> List[Dict[str,
     for row in rows:
         new_row = {}
         for k, v in row.items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
+            # Only perturb floating-point fields; integer identifiers should remain exact.
+            if isinstance(v, float):
                 new_row[k] = v * (1.0 + factor)
             else:
                 new_row[k] = v
@@ -83,30 +84,32 @@ def _truncate_decimals(rows: List[Dict[str, Any]], decimals: int) -> List[Dict[s
     return out
 
 
+def generate_adversarial_variants_map(
+    *,
+    rows: List[Dict[str, Any]],
+    mode: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    variants: Dict[str, List[Dict[str, Any]]] = {
+        "reorder": _reorder_rows(rows),
+        "jitter_small": _perturb_floats(rows, factor=5e-5),
+        "jitter_large": _perturb_floats(rows, factor=5e-2),
+        "signed_zero": _flip_signed_zero(rows),
+        "truncate_3dp": _truncate_decimals(rows, decimals=3),
+    }
+    if mode in ("table", "vectors"):
+        variants["nan_inject"] = _inject_nan(rows, key="x")
+    return variants
+
+
 def generate_adversarial_variants(
     *,
     rows: List[Dict[str, Any]],
     out_dir: Path,
     mode: str,
 ) -> None:
-    # 1) reorder
-    _write_jsonl(out_dir / "reorder.jsonl", _reorder_rows(rows))
-
-    # 2) small jitter (should usually pass fp_tolerant)
-    _write_jsonl(out_dir / "jitter_small.jsonl", _perturb_floats(rows, factor=5e-5))
-
-    # 3) large jitter (should fail fp_tolerant)
-    _write_jsonl(out_dir / "jitter_large.jsonl", _perturb_floats(rows, factor=5e-2))
-
-    # 4) signed zero flip
-    _write_jsonl(out_dir / "signed_zero.jsonl", _flip_signed_zero(rows))
-
-    # 5) truncate decimals
-    _write_jsonl(out_dir / "truncate_3dp.jsonl", _truncate_decimals(rows, decimals=3))
-
-    # 6) NaN injection (only makes sense for schemas that allow NaN)
-    if mode in ("table", "vectors"):
-        _write_jsonl(out_dir / "nan_inject.jsonl", _inject_nan(rows, key="x"))
+    variants = generate_adversarial_variants_map(rows=rows, mode=mode)
+    for name, variant_rows in variants.items():
+        _write_jsonl(out_dir / f"{name}.jsonl", variant_rows)
 
 
 def main() -> None:

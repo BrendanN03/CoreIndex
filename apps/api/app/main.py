@@ -42,12 +42,18 @@ app.add_middleware(
 app.include_router(api_v1_router)
 
 
+@app.get("/health")
+def health_check():
+    """Liveness probe — no storage; use for proxy sanity checks."""
+    return {"status": "ok", "service": "coreindex-api"}
+
+
 @app.on_event("startup")
 def _expand_default_threadpool():
     """Avoid starving sync route handlers when the UI fans out many feasibility calls."""
     try:
         loop = asyncio.get_running_loop()
-        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=80))
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=128))
     except Exception:
         logging.getLogger("uvicorn.error").warning(
             "Could not expand default ThreadPoolExecutor", exc_info=True
@@ -138,6 +144,18 @@ def _flush_storage_snapshot():
     except Exception:
         logging.getLogger("uvicorn.error").warning(
             "Could not flush storage snapshot on shutdown", exc_info=True
+        )
+
+
+@app.on_event("shutdown")
+def _flush_auth_snapshot():
+    try:
+        from app.api.v1.endpoints.auth import auth_storage
+
+        auth_storage.flush_persist_blocking()
+    except Exception:
+        logging.getLogger("uvicorn.error").warning(
+            "Could not flush auth snapshot on shutdown", exc_info=True
         )
 
 

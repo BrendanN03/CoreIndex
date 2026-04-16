@@ -58,7 +58,7 @@ export function MyLots({ refreshTrigger = 0 }: Props) {
     }
   }
 
-  async function submitDemoResult(lotId: string) {
+  async function submitResult(lotId: string) {
     setBusyLotId(lotId);
     setError(null);
     try {
@@ -67,7 +67,7 @@ export function MyLots({ refreshTrigger = 0 }: Props) {
         item_count: 1000,
         wall_time_seconds: 120,
         raw_gpu_time_seconds: 110,
-        logs_uri: 'https://example.com/logs/demo',
+        logs_uri: `https://example.com/logs/${encodeURIComponent(lotId)}`,
       });
       await fetchLots();
     } catch (e) {
@@ -111,7 +111,7 @@ export function MyLots({ refreshTrigger = 0 }: Props) {
                 <TableCell colSpan={6} className="text-slate-400 text-sm">
                   {loading
                     ? 'Loading…'
-                    : 'No lots yet. Create one with POST /lots above.'}
+                    : 'No lots yet. Allocate one from the provider control panel.'}
                 </TableCell>
               </TableRow>
             ) : (
@@ -151,7 +151,7 @@ export function MyLots({ refreshTrigger = 0 }: Props) {
                         disabled={
                           busyLotId === l.lot_id || !['ready', 'running', 'preparing'].includes(l.status)
                         }
-                        onClick={() => void submitDemoResult(l.lot_id)}
+                        onClick={() => void submitResult(l.lot_id)}
                       >
                         Submit Result
                       </Button>

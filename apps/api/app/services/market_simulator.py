@@ -72,7 +72,16 @@ class MarketSimulatorEngine:
         """
         with self._lock:
             if self._thread and self._thread.is_alive() and not self._stop_event.is_set():
-                return self.status()
+                # Already running: return status without re-entering the same non-reentrant lock.
+                return MarketSimulationStatusResponse(
+                    running=True,
+                    synthetic_buyer_agents=len(self._buyers),
+                    synthetic_seller_agents=len(self._sellers),
+                    ticks_per_second=self._ticks_per_second,
+                    started_at=self._started_at,
+                    total_ticks=self._tick_count,
+                    total_synthetic_orders=self._synthetic_order_count,
+                )
             thread_to_join = self._thread if (self._thread and self._thread.is_alive()) else None
         if thread_to_join is not None:
             self._stop_event.set()
@@ -82,7 +91,15 @@ class MarketSimulatorEngine:
                 logging.getLogger("uvicorn.error").warning(
                     "market_simulator: tick thread still alive after join; refusing to start a second loop"
                 )
-                return self.status()
+                return MarketSimulationStatusResponse(
+                    running=True,
+                    synthetic_buyer_agents=len(self._buyers),
+                    synthetic_seller_agents=len(self._sellers),
+                    ticks_per_second=self._ticks_per_second,
+                    started_at=self._started_at,
+                    total_ticks=self._tick_count,
+                    total_synthetic_orders=self._synthetic_order_count,
+                )
             self._stop_event.clear()
             self._buyers = [f"sim-buyer-{idx:03d}" for idx in range(request.synthetic_buyer_agents)]
             self._sellers = [f"sim-seller-{idx:03d}" for idx in range(request.synthetic_seller_agents)]

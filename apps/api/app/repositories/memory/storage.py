@@ -46,6 +46,16 @@ from app.schemas.models import (
     ExchangeOrderBookLevel,
     ExchangeOrderBookResponse,
     PlatformEvent,
+    CollectiveSessionCreateRequest,
+    CollectiveSessionResponse,
+    SessionFinalizeResponse,
+    JobReceiptsResponse,
+    JobReceiptRow,
+    SettlementAnchorRequest,
+    SettlementPayRequest,
+    SettlementRunResponse,
+    SettlementState,
+    SessionState,
     OptionContractCreateRequest,
     OptionContractResponse,
     OptionContractStatus,
@@ -112,6 +122,8 @@ class JobStorage:
         self._nominations: Dict[str, NominationResponse] = {}
         self._lots: Dict[str, Lot] = {}
         self._events: List[PlatformEvent] = []
+        self._sessions: Dict[str, CollectiveSessionResponse] = {}
+        self._settlement_runs: Dict[str, SettlementRunResponse] = {}
         self._option_contracts: Dict[str, OptionContractResponse] = {}
         self._option_orders: Dict[str, OptionOrderResponse] = {}
         self._option_trades: List[OptionTradeResponse] = []
@@ -132,7 +144,7 @@ class JobStorage:
         self._persist_dirty = False
         self._persist_timer: threading.Timer | None = None
         self._persist_sched_lock = threading.Lock()
-        self._persist_debounce_s = float(os.getenv("COREINDEX_PERSIST_DEBOUNCE_SECONDS", "0.5"))
+        self._persist_debounce_s = float(os.getenv("COREINDEX_PERSIST_DEBOUNCE_SECONDS", "0.2"))
         self._load_state()
 
     def _load_state(self) -> None:
@@ -169,6 +181,14 @@ class JobStorage:
         self._nominations = {
             key: NominationResponse.model_validate(value)
             for key, value in raw.get("nominations", {}).items()
+        }
+        self._sessions = {
+            key: CollectiveSessionResponse.model_validate(value)
+            for key, value in raw.get("sessions", {}).items()
+        }
+        self._settlement_runs = {
+            key: SettlementRunResponse.model_validate(value)
+            for key, value in raw.get("settlement_runs", {}).items()
         }
         self._option_contracts = {
             key: OptionContractResponse.model_validate(value)
@@ -228,61 +248,86 @@ class JobStorage:
         if len(self._events) > _MAX_PERSISTED_EVENTS:
             self._events = self._events[-_MAX_PERSISTED_EVENTS:]
 
-    def _build_persist_snapshot_unlocked(self) -> dict:
-        """Build JSON-serializable snapshot. Caller must hold self._lock."""
+    def _trim_events_unlocked(self) -> None:
         if len(self._events) > _MAX_PERSISTED_EVENTS:
             self._events = self._events[-_MAX_PERSISTED_EVENTS:]
+
+    def _clone_state_refs_for_persist_unlocked(self) -> dict:
+        """Shallow copies only — keep this fast; caller must hold self._lock."""
+        self._trim_events_unlocked()
         return {
-            "jobs": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._jobs.items())
-            },
+            "jobs": dict(self._jobs),
             "vouchers": dict(self._vouchers),
-            "voucher_deposits": {
-                jid: dict(deps) for jid, deps in list(self._voucher_deposits.items())
-            },
-            "positions": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._positions.items())
-            },
-            "orders": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._orders.items())
-            },
-            "trades": [trade.model_dump(mode="json") for trade in list(self._trades)],
-            "nominations": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._nominations.items())
-            },
-            "option_contracts": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._option_contracts.items())
-            },
-            "option_orders": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._option_orders.items())
-            },
-            "option_trades": [
-                trade.model_dump(mode="json") for trade in list(self._option_trades)
-            ],
+            "voucher_deposits": {jid: dict(deps) for jid, deps in self._voucher_deposits.items()},
+            "positions": dict(self._positions),
+            "orders": dict(self._orders),
+            "trades": list(self._trades),
+            "nominations": dict(self._nominations),
+            "sessions": dict(self._sessions),
+            "settlement_runs": dict(self._settlement_runs),
+            "option_contracts": dict(self._option_contracts),
+            "option_orders": dict(self._option_orders),
+            "option_trades": list(self._option_trades),
             "risk_profiles": dict(self._risk_profiles),
             "kill_switches": dict(self._kill_switches),
+            "strategy_limits": {ok: dict(inner) for ok, inner in self._strategy_limits.items()},
+            "owner_hierarchy": {ok: dict(inner) for ok, inner in self._owner_hierarchy.items()},
+            "subaccount_limits": {
+                ok: {sk: dict(sv) for sk, sv in inner.items()}
+                for ok, inner in self._subaccount_limits.items()
+            },
+            "lots": dict(self._lots),
+            "events": list(self._events),
+        }
+
+    @staticmethod
+    def _materialize_persist_payload(refs: dict) -> dict:
+        """Heavy model_dump / JSON prep — run without holding storage lock."""
+        return {
+            "jobs": {key: value.model_dump(mode="json") for key, value in refs["jobs"].items()},
+            "vouchers": dict(refs["vouchers"]),
+            "voucher_deposits": {
+                jid: dict(deps) for jid, deps in refs["voucher_deposits"].items()
+            },
+            "positions": {key: value.model_dump(mode="json") for key, value in refs["positions"].items()},
+            "orders": {key: value.model_dump(mode="json") for key, value in refs["orders"].items()},
+            "trades": [trade.model_dump(mode="json") for trade in refs["trades"]],
+            "nominations": {
+                key: value.model_dump(mode="json") for key, value in refs["nominations"].items()
+            },
+            "sessions": {
+                key: value.model_dump(mode="json") for key, value in refs["sessions"].items()
+            },
+            "settlement_runs": {
+                key: value.model_dump(mode="json") for key, value in refs["settlement_runs"].items()
+            },
+            "option_contracts": {
+                key: value.model_dump(mode="json") for key, value in refs["option_contracts"].items()
+            },
+            "option_orders": {
+                key: value.model_dump(mode="json") for key, value in refs["option_orders"].items()
+            },
+            "option_trades": [trade.model_dump(mode="json") for trade in refs["option_trades"]],
+            "risk_profiles": dict(refs["risk_profiles"]),
+            "kill_switches": dict(refs["kill_switches"]),
             "strategy_limits": {
-                ok: dict(inner) for ok, inner in list(self._strategy_limits.items())
+                ok: dict(inner) for ok, inner in refs["strategy_limits"].items()
             },
             "owner_hierarchy": {
-                ok: dict(inner) for ok, inner in list(self._owner_hierarchy.items())
+                ok: dict(inner) for ok, inner in refs["owner_hierarchy"].items()
             },
             "subaccount_limits": {
-                ok: {sk: dict(sv) for sk, sv in list(inner.items())}
-                for ok, inner in list(self._subaccount_limits.items())
+                ok: {sk: dict(sv) for sk, sv in inner.items()}
+                for ok, inner in refs["subaccount_limits"].items()
             },
-            "lots": {
-                key: value.model_dump(mode="json")
-                for key, value in list(self._lots.items())
-            },
-            "events": [event.model_dump(mode="json") for event in list(self._events)],
+            "lots": {key: value.model_dump(mode="json") for key, value in refs["lots"].items()},
+            "events": [event.model_dump(mode="json") for event in refs["events"]],
         }
+
+    def _build_persist_snapshot_unlocked(self) -> dict:
+        """Build JSON-serializable snapshot. Caller must hold self._lock."""
+        refs = self._clone_state_refs_for_persist_unlocked()
+        return JobStorage._materialize_persist_payload(refs)
 
     def _persist_state(self) -> None:
         """Mark state dirty and schedule a disk flush (coalesced). Never blocks on I/O."""
@@ -300,29 +345,44 @@ class JobStorage:
             timer.start()
 
     def _timer_flush_persist(self) -> None:
-        """Write snapshot to disk without holding storage lock during json.dumps / IO."""
+        """Write snapshot to disk; keep self._lock only for quick ref copies, not model_dump."""
         with self._persist_sched_lock:
             self._persist_timer = None
-        payload: dict | None = None
+        refs: dict | None = None
         try:
             with self._lock:
                 if not self._persist_dirty:
                     return
                 self._persist_dirty = False
-                payload = self._build_persist_snapshot_unlocked()
+                refs = self._clone_state_refs_for_persist_unlocked()
         except Exception:
             logging.getLogger("uvicorn.error").exception("storage persist: snapshot failed")
             with self._lock:
                 self._persist_dirty = True
             return
-        if payload is None:
+        if refs is None:
             return
         try:
-            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = JobStorage._materialize_persist_payload(refs)
+        except Exception:
+            logging.getLogger("uvicorn.error").exception("storage persist: materialize failed")
+            with self._lock:
+                self._persist_dirty = True
+            return
+        try:
+            parent = self._state_file.parent
+            parent.mkdir(parents=True, exist_ok=True)
             text = json.dumps(payload, separators=(",", ":"))
-            tmp = self._state_file.with_suffix(".json.tmp")
-            tmp.write_text(text, encoding="utf-8")
-            tmp.replace(self._state_file)
+            tmp = parent / f".storage_state_{uuid.uuid4().hex}.tmp"
+            try:
+                tmp.write_text(text, encoding="utf-8")
+                os.replace(tmp, self._state_file)
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
         except Exception:
             logging.getLogger("uvicorn.error").exception("storage persist: disk write failed")
             with self._lock:
@@ -336,12 +396,21 @@ class JobStorage:
                 self._persist_timer = None
         with self._lock:
             self._persist_dirty = False
-            payload = self._build_persist_snapshot_unlocked()
-        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            refs = self._clone_state_refs_for_persist_unlocked()
+        payload = JobStorage._materialize_persist_payload(refs)
+        parent = self._state_file.parent
+        parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(payload, separators=(",", ":"))
-        tmp = self._state_file.with_suffix(".json.tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(self._state_file)
+        tmp = parent / f".storage_state_{uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._state_file)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def _record_event(self, event_type: str, entity_type: str, entity_id: str, payload: dict):
         event = PlatformEvent(
@@ -373,6 +442,270 @@ class JobStorage:
             position_id,
             {"job_id": job_id, **payload},
         )
+
+    def record_qc_submission(self, kind: str, job_id: str, payload: dict) -> PlatformEvent:
+        return self._record_event(
+            f"qc.{kind}",
+            "job",
+            job_id,
+            payload,
+        )
+
+    def create_collective_session(
+        self,
+        request: CollectiveSessionCreateRequest,
+    ) -> CollectiveSessionResponse:
+        if request.session_id in self._sessions:
+            raise ValueError("session_already_exists")
+        if not self.get_job(request.job_id):
+            raise ValueError("job_not_found")
+        if request.world_size < len(request.membership):
+            raise ValueError("world_size_less_than_membership")
+        now = datetime.utcnow().isoformat() + "Z"
+        row = CollectiveSessionResponse(
+            session_id=request.session_id,
+            job_id=request.job_id,
+            product_key=ProductKey(
+                region=request.region,
+                iso_hour=request.iso_hour,
+                sla=request.sla,
+                tier=request.tier,
+            ),
+            world_size=request.world_size,
+            membership=list(dict.fromkeys(request.membership)),
+            net_profile=request.net_profile,
+            state=SessionState.DECLARED,
+            ready_members=[],
+            ready_count=0,
+            created_at=now,
+        )
+        self._sessions[row.session_id] = row
+        self._record_event(
+            "session.declared",
+            "session",
+            row.session_id,
+            {
+                "job_id": row.job_id,
+                "product_key": row.product_key.model_dump(mode="json"),
+                "world_size": row.world_size,
+                "membership_count": len(row.membership),
+                "net_profile": row.net_profile,
+            },
+        )
+        return row
+
+    def list_collective_sessions(
+        self, *, job_id: Optional[str] = None
+    ) -> List[CollectiveSessionResponse]:
+        rows = list(self._sessions.values())
+        if job_id:
+            rows = [row for row in rows if row.job_id == job_id]
+        rows.sort(key=lambda row: row.created_at, reverse=True)
+        return rows
+
+    def get_collective_session(self, session_id: str) -> Optional[CollectiveSessionResponse]:
+        return self._sessions.get(session_id)
+
+    def finalize_collective_session(self, session_id: str) -> SessionFinalizeResponse:
+        row = self.get_collective_session(session_id)
+        if not row:
+            raise ValueError("session_not_found")
+        if row.state not in (SessionState.DECLARED, SessionState.FINALIZED):
+            raise ValueError("session_cannot_be_finalized_from_current_state")
+        now = datetime.utcnow().isoformat() + "Z"
+        next_row = row.model_copy(
+            update={"state": SessionState.FINALIZED, "finalized_at": row.finalized_at or now}
+        )
+        self._sessions[session_id] = next_row
+        self._record_event(
+            "session.finalized",
+            "session",
+            session_id,
+            {
+                "job_id": row.job_id,
+                "world_size": row.world_size,
+                "ready_count": next_row.ready_count,
+            },
+        )
+        return SessionFinalizeResponse(
+            session_id=session_id,
+            state=next_row.state,
+            ready_count=next_row.ready_count,
+            world_size=next_row.world_size,
+        )
+
+    def attest_collective_session_ready(
+        self, session_id: str, member_id: str
+    ) -> CollectiveSessionResponse:
+        row = self.get_collective_session(session_id)
+        if not row:
+            raise ValueError("session_not_found")
+        if row.state not in (SessionState.FINALIZED, SessionState.READY, SessionState.ACTIVE):
+            raise ValueError("session_not_finalized")
+        if member_id not in row.membership:
+            raise ValueError("member_not_in_session")
+        ready_members = list(row.ready_members)
+        if member_id not in ready_members:
+            ready_members.append(member_id)
+        next_state = SessionState.READY
+        activated_at = row.activated_at
+        if len(ready_members) >= row.world_size:
+            next_state = SessionState.ACTIVE
+            if activated_at is None:
+                activated_at = datetime.utcnow().isoformat() + "Z"
+        next_row = row.model_copy(
+            update={
+                "ready_members": ready_members,
+                "ready_count": len(ready_members),
+                "state": next_state,
+                "activated_at": activated_at,
+            }
+        )
+        self._sessions[session_id] = next_row
+        self._record_event(
+            "session.member_ready",
+            "session",
+            session_id,
+            {
+                "job_id": row.job_id,
+                "member_id": member_id,
+                "ready_count": next_row.ready_count,
+                "world_size": row.world_size,
+                "state": next_row.state.value,
+            },
+        )
+        return next_row
+
+    def get_job_receipts(self, job_id: str) -> JobReceiptsResponse:
+        rows: List[JobReceiptRow] = []
+        for event in reversed(self._events):
+            if event.event_type != "delivery.compute_run_completed":
+                continue
+            payload = event.payload or {}
+            if str(payload.get("job_id") or "") != job_id:
+                continue
+            executions = payload.get("provider_executions")
+            provider_count = len(executions) if isinstance(executions, list) else 0
+            delivered_ngh_raw = payload.get("delivered_ngh")
+            delivered_ngh = (
+                float(delivered_ngh_raw)
+                if isinstance(delivered_ngh_raw, (int, float))
+                else 0.0
+            )
+            rows.append(
+                JobReceiptRow(
+                    event_id=event.event_id,
+                    created_at=event.created_at,
+                    position_id=event.entity_id,
+                    provider_count=provider_count,
+                    delivered_ngh=delivered_ngh,
+                    settlement_status=(
+                        str(payload.get("settlement_status"))
+                        if payload.get("settlement_status") is not None
+                        else None
+                    ),
+                    verification_hash=(
+                        str(payload.get("verification_hash"))
+                        if payload.get("verification_hash") is not None
+                        else None
+                    ),
+                    blockchain_anchor=(
+                        payload.get("blockchain_anchor")
+                        if isinstance(payload.get("blockchain_anchor"), dict)
+                        else None
+                    ),
+                    payload=payload,
+                )
+            )
+        return JobReceiptsResponse(job_id=job_id, receipt_count=len(rows), receipts=rows)
+
+    def create_settlement_anchor(
+        self, request: SettlementAnchorRequest
+    ) -> SettlementRunResponse:
+        if not self.get_job(request.job_id):
+            raise ValueError("job_not_found")
+        settlement_id = str(uuid.uuid4())
+        row = SettlementRunResponse(
+            settlement_id=settlement_id,
+            job_id=request.job_id,
+            state=SettlementState.READY,
+            receipt_root=request.receipt_root,
+            qc_root=request.qc_root,
+            created_at=datetime.utcnow().isoformat() + "Z",
+        )
+        self._settlement_runs[settlement_id] = row
+        self._record_event(
+            "settlement.anchored",
+            "settlement",
+            settlement_id,
+            {
+                "job_id": request.job_id,
+                "receipt_root": request.receipt_root,
+                "qc_root": request.qc_root,
+                "note": request.note,
+            },
+        )
+        return row
+
+    def get_settlement_run(self, settlement_id: str) -> Optional[SettlementRunResponse]:
+        return self._settlement_runs.get(settlement_id)
+
+    def set_settlement_onchain_anchor(
+        self,
+        settlement_id: str,
+        *,
+        anchor_hash: str,
+        blockchain_anchor: dict,
+    ) -> SettlementRunResponse:
+        row = self._settlement_runs.get(settlement_id)
+        if not row:
+            raise ValueError("settlement_not_found")
+        updated = row.model_copy(
+            update={
+                "anchor_hash": anchor_hash,
+                "blockchain_anchor": blockchain_anchor,
+            }
+        )
+        self._settlement_runs[settlement_id] = updated
+        self._record_event(
+            "settlement.anchor_recorded",
+            "settlement",
+            settlement_id,
+            {
+                "anchor_hash": anchor_hash,
+                "blockchain_anchor": blockchain_anchor,
+            },
+        )
+        return updated
+
+    def settle_job(self, request: SettlementPayRequest) -> SettlementRunResponse:
+        row = self._settlement_runs.get(request.settlement_id)
+        if not row:
+            raise ValueError("settlement_not_found")
+        if row.job_id != request.job_id:
+            raise ValueError("settlement_job_mismatch")
+        if row.state == SettlementState.SETTLED:
+            return row
+        updated = row.model_copy(
+            update={
+                "state": SettlementState.SETTLED,
+                "accepted_ngh": request.accepted_ngh,
+                "rejected_ngh": request.rejected_ngh,
+                "settled_at": datetime.utcnow().isoformat() + "Z",
+            }
+        )
+        self._settlement_runs[request.settlement_id] = updated
+        self._record_event(
+            "settlement.paid",
+            "settlement",
+            request.settlement_id,
+            {
+                "job_id": request.job_id,
+                "accepted_ngh": request.accepted_ngh,
+                "rejected_ngh": request.rejected_ngh,
+            },
+        )
+        return updated
 
     def _owner_key(self, owner_id: Optional[str]) -> str:
         return owner_id or "__guest__"
@@ -516,6 +849,9 @@ class JobStorage:
                 if (best_bid is not None and best_ask is not None)
                 else None
             )
+            # Keep spread non-negative for schema validation even when fragmented books cross.
+            if spread is not None and spread < 0:
+                spread = 0.0
             active_order_count = sum(r.active_order_count for r in group)
             weighted = sum(
                 r.last_price_per_ngh * r.traded_volume_ngh_5m
@@ -1668,6 +2004,29 @@ class JobStorage:
             remaining_balance_ngh=self._vouchers[key],
         )
 
+    def consume_deposited_vouchers(
+        self, job_id: str, product_key: ProductKey, amount_ngh: float
+    ) -> float:
+        """Consume escrowed vouchers for a job/product key and return remaining escrow."""
+        key = product_key.as_storage_key()
+        current = self.get_deposited_voucher_balance(job_id, key)
+        if current < amount_ngh:
+            raise ValueError("insufficient_deposited_vouchers")
+        next_amount = current - amount_ngh
+        self._voucher_deposits.setdefault(job_id, {})
+        self._voucher_deposits[job_id][key] = next_amount
+        self._record_event(
+            "voucher.consumed",
+            "job",
+            job_id,
+            {
+                "product_key": product_key.model_dump(mode="json"),
+                "amount_ngh": amount_ngh,
+                "remaining_deposited_ngh": next_amount,
+            },
+        )
+        return next_amount
+
     # ---- market positions ----
     def create_market_position(
         self,
@@ -2681,6 +3040,8 @@ def _synchronize_job_storage(cls: type) -> type:
         # These manage their own locking; wrapping would hold _lock across disk I/O.
         "_timer_flush_persist",
         "flush_persist_blocking",
+        # staticmethod: class-level call JobStorage._materialize_persist_payload(refs) must not use lock wrapper.
+        "_materialize_persist_payload",
     })
     for name, attr in list(cls.__dict__.items()):
         if name in skip:

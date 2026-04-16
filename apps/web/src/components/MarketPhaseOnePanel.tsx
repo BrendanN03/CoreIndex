@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -11,16 +11,33 @@ import {
   SelectValue,
 } from './ui/select';
 import {
+  JobApi,
   MarketApi,
   PlatformApi,
+  QcApi,
+  SessionApi,
+  SettlementApi,
   VoucherApi,
-  type ComputeDeliveryResponseDto,
+  type CollectiveSessionResponseDto,
+  type ExecutionPreflightResponseDto,
   type DemoProviderExecutionResponseDto,
   type DemoRunResponseDto,
-  type DemoRunTrackResponseDto,
   type GpuBackendStatusDto,
+  type JobReceiptsResponseDto,
   type MarketPositionResponseDto,
   type ProductKeyDto,
+  type QcAdversarialMatrixResponseDto,
+  type QcAdversarialSuiteResponseDto,
+  type QcGoldCorpusCaseDto,
+  type QcGoldCorpusEvaluateResponseDto,
+  type QcGoldCorpusSavedReportDto,
+  type QcGoldPassCriteriaDto,
+  type QcCanonicalizeResponseDto,
+  type QcCompareResponseDto,
+  type QcHashResponseDto,
+  type QcModeDto,
+  type SettlementOnchainVerifyResponseDto,
+  type SettlementRunResponseDto,
   type VoucherBalanceResponseDto,
   type WindowDto,
 } from '../lib/api';
@@ -42,6 +59,37 @@ const gpuBasePrices: Record<string, number> = {
 
 function formatProductKey(productKey: WindowDto) {
   return `${productKey.region} · ${productKey.iso_hour}h · ${productKey.sla} · ${productKey.tier}`;
+}
+
+function validComposite(raw: string): boolean {
+  return /^\d{2,}$/.test(raw.trim());
+}
+
+/** Must match API `target_settle_seconds` max (366 days). */
+const MAX_TARGET_SETTLE_SECONDS = 366 * 24 * 3600;
+
+type HorizonUnit = 'seconds' | 'minutes' | 'days' | 'months';
+
+function horizonToSeconds(amount: number, unit: HorizonUnit): number {
+  const a = Number.isFinite(amount) && amount > 0 ? amount : 1;
+  let sec: number;
+  switch (unit) {
+    case 'seconds':
+      sec = Math.floor(a);
+      break;
+    case 'minutes':
+      sec = Math.floor(a * 60);
+      break;
+    case 'days':
+      sec = Math.floor(a * 86400);
+      break;
+    case 'months':
+      sec = Math.floor(a * 30 * 86400);
+      break;
+    default:
+      sec = 300;
+  }
+  return Math.min(MAX_TARGET_SETTLE_SECONDS, Math.max(30, sec));
 }
 
 function strVal(v: unknown): string | undefined {
@@ -127,14 +175,190 @@ function FactoringSummaryReceipt({
   );
 }
 
-function DemoExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
+function formatHorizonLabel(totalSeconds: number): string {
+  const sec = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m (${sec}s)`;
+  if (m > 0) return `${m}m ${s}s (${sec}s)`;
+  return `${sec}s`;
+}
+
+function parseJsonlRows(input: string): Record<string, unknown>[] {
+  return input
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function downloadJson(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+type P2Preset = {
+  name: string;
+  schemaId: string;
+  mode: QcModeDto;
+  relTol: number;
+  maxUlp: number;
+  a: string;
+  b: string;
+};
+
+const P2_PRESETS: Record<string, P2Preset> = {
+  serializerVariance: {
+    name: 'Serializer variance',
+    schemaId: 'table@1',
+    mode: 'bit_exact',
+    relTol: 1e-4,
+    maxUlp: 2,
+    a: '{"id":"a","x":1.0,"meta":{"ok":true}}\n{"id":"b","x":2.0,"meta":{"ok":false}}\n',
+    b: '{"x":2.0,"meta":{"ok":false},"id":"b"}\n{"meta":{"ok":true},"id":"a","x":1.0}\n',
+  },
+  fpJitter: {
+    name: 'FP jitter',
+    schemaId: 'vectors@1',
+    mode: 'fp_tolerant',
+    relTol: 1e-4,
+    maxUlp: 2,
+    a: '{"id":"v1","vector":[1.0,2.0,3.0]}\n',
+    b: '{"id":"v1","vector":[1.0000000000000002,2.0,3.0]}\n',
+  },
+  fpDriftFail: {
+    name: 'FP drift fail',
+    schemaId: 'vectors@1',
+    mode: 'fp_tolerant',
+    relTol: 1e-4,
+    maxUlp: 2,
+    a: '{"id":"v1","vector":[1.2,2.0,3.0]}\n',
+    b: '{"id":"v1","vector":[1.6,2.0,3.0]}\n',
+  },
+};
+
+type P2CorpusCase = {
+  id: string;
+  title: string;
+  description: string;
+  schemaId: string;
+  mode: QcModeDto;
+  inputA: string;
+  inputB: string;
+  inputFormatA?: string;
+  inputFormatB?: string;
+  relTol?: number;
+  maxUlp?: number;
+  strategy: 'compare' | 'canonical_root';
+  expectEqual: boolean;
+};
+
+type P2CorpusResult = {
+  id: string;
+  title: string;
+  expectedEqual: boolean;
+  observedEqual: boolean;
+  passed: boolean;
+  detail: string;
+};
+
+const P2_CORPUS: P2CorpusCase[] = [
+  {
+    id: 'serializer-key-order',
+    title: 'Serializer key-order variance',
+    description: 'Semantically same row, different JSON field order.',
+    schemaId: 'table@1',
+    mode: 'bit_exact',
+    strategy: 'compare',
+    expectEqual: true,
+    inputA: '{"id":"a","ts_utc":"2026-01-01T00:00:00Z","x":1.2,"y":2.3}\n',
+    inputB: '{"y":2.3,"x":1.2,"ts_utc":"2026-01-01T00:00:00Z","id":"a"}\n',
+  },
+  {
+    id: 'float-jitter-pass',
+    title: 'FP jitter within tolerance',
+    description: 'Small numeric drift should pass fp_tolerant.',
+    schemaId: 'vectors@1',
+    mode: 'fp_tolerant',
+    relTol: 1e-4,
+    maxUlp: 2,
+    strategy: 'compare',
+    expectEqual: true,
+    inputA: '{"id":"v1","vector":[1.0,2.0,3.0]}\n',
+    inputB: '{"id":"v1","vector":[1.0000000000000002,2.0,3.0]}\n',
+  },
+  {
+    id: 'float-jitter-fail',
+    title: 'FP jitter beyond tolerance',
+    description: 'Large numeric drift should fail fp_tolerant.',
+    schemaId: 'vectors@1',
+    mode: 'fp_tolerant',
+    relTol: 1e-4,
+    maxUlp: 2,
+    strategy: 'compare',
+    expectEqual: false,
+    inputA: '{"id":"v1","vector":[1.2,2.0,3.0]}\n',
+    inputB: '{"id":"v1","vector":[1.5,2.0,3.0]}\n',
+  },
+  {
+    id: 'row-order-root',
+    title: 'Row-order canonical root stability',
+    description: 'Canonicalization should normalize row ordering by schema key.',
+    schemaId: 'table@1',
+    mode: 'bit_exact',
+    strategy: 'canonical_root',
+    expectEqual: true,
+    inputFormatA: 'jsonl',
+    inputFormatB: 'jsonl',
+    inputA:
+      '{"id":"b","ts":"2026-01-01T00:00:01Z","x":2.0,"y":3.0}\n{"id":"a","ts":"2026-01-01T00:00:00Z","x":1.0,"y":2.0}\n',
+    inputB:
+      '{"id":"a","ts_utc":"2026-01-01T00:00:00Z","x":1.0,"y":2.0}\n{"id":"b","ts_utc":"2026-01-01T00:00:01Z","x":2.0,"y":3.0}\n',
+  },
+  {
+    id: 'csv-vs-jsonl',
+    title: 'CSV vs JSONL canonical equivalence',
+    description: 'Different source encodings should canonicalize to same root.',
+    schemaId: 'table@1',
+    mode: 'bit_exact',
+    strategy: 'canonical_root',
+    expectEqual: true,
+    inputFormatA: 'csv',
+    inputFormatB: 'jsonl',
+    inputA: 'id,ts_utc,x,y\nalpha,2026-01-01T00:00:00Z,1.0,2.0\n',
+    inputB: '{"id":"alpha","ts_utc":"2026-01-01T00:00:00Z","x":1.0,"y":2.0}\n',
+  },
+  {
+    id: 'cado-mismatch',
+    title: 'CADO relation mismatch',
+    description: 'Material integer difference should fail equality.',
+    schemaId: 'cado_relations@1',
+    mode: 'bit_exact',
+    strategy: 'compare',
+    expectEqual: false,
+    inputA: '{"a":1001,"b":2,"p":11,"q":13}\n',
+    inputB: '{"a":1002,"b":2,"p":11,"q":13}\n',
+  },
+];
+
+function ExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
   const anchor = run.blockchain_anchor;
+  const pk = run.futures_product_key;
+  const factors = run.consolidated_prime_factors ?? [];
+  const sellerCount = run.matched_seller_count ?? run.provider_executions.length;
   return (
     <Card className="bg-slate-900 border-slate-700 p-6 space-y-5">
       <div>
-        <h3 className="text-slate-100 text-base font-semibold">Execution receipt · one-click demo</h3>
+        <h3 className="text-slate-100 text-base font-semibold">Execution receipt · futures delivery</h3>
         <p className="mt-1 text-xs text-slate-500">
-          Futures → vouchers → matched providers → remote ECM/CADO-NFS → verification → anchor.
+          Priced contract → vouchers → matched sellers (max 4) → per-seller GPU CADO-NFS → hash verification →
+          blockchain anchor.
         </p>
       </div>
 
@@ -149,19 +373,52 @@ function DemoExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
           {run.position_id}
         </div>
         <div>
+          <span className="text-slate-500">Buyer (owner): </span>
+          <span className="font-mono">{run.buyer_owner_id ?? '—'}</span>
+        </div>
+        <div>
           <span className="text-slate-500">Run status: </span>
           {run.run_status}
         </div>
         <div>
           <span className="text-slate-500">Settlement: </span>
-          {run.settlement_status} · target {run.settlement_target_seconds}s · delivered{' '}
+          {run.settlement_status} · horizon {formatHorizonLabel(run.settlement_target_seconds)} · delivered{' '}
           {run.delivered_ngh.toFixed(2)} NGH · wallet remainder {run.remaining_wallet_ngh.toFixed(2)} NGH
         </div>
+        {pk ? (
+          <div>
+            <span className="text-slate-500">Contract window: </span>
+            {formatProductKey(pk)}
+          </div>
+        ) : null}
+        {run.futures_quantity_ngh != null && run.futures_price_per_ngh != null ? (
+          <div>
+            <span className="text-slate-500">Futures leg: </span>
+            {run.futures_quantity_ngh.toFixed(2)} NGH @ ${run.futures_price_per_ngh.toFixed(4)}/NGH · notional $
+            {(run.futures_contract_notional ?? run.futures_quantity_ngh * run.futures_price_per_ngh).toFixed(4)}
+          </div>
+        ) : null}
+        <div>
+          <span className="text-slate-500">Integer factored (N): </span>
+          <span className="font-mono text-cyan-200/90">{run.composite_to_factor ?? '—'}</span>
+        </div>
+        {factors.length ? (
+          <div>
+            <span className="text-slate-500">Reported prime factors: </span>
+            <span className="font-mono text-emerald-200/90">{factors.join(' × ')}</span>
+          </div>
+        ) : null}
       </div>
 
       <div>
-        <div className="text-sm font-medium text-slate-200 mb-2">Parties &amp; matching</div>
+        <div className="text-sm font-medium text-slate-200 mb-2">Parties and matching</div>
         <ul className="space-y-2 text-xs text-slate-300">
+          <li>
+            <span className="text-slate-500">Distinct sellers matched: </span>
+            {sellerCount} (max 4) ·{' '}
+            <span className="text-slate-500">Total GPU slots: </span>
+            {run.matched_gpu_count} (max 4, one slot per matched GPU on the book)
+          </li>
           <li>
             <span className="text-slate-500">Market policy: </span>
             {run.provider_selection_policy}
@@ -172,19 +429,32 @@ function DemoExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
             <span className="text-slate-500">Synthetic excluded: </span>
             {run.synthetic_excluded ? 'yes' : 'no'}
           </li>
-          <li>
-            <span className="text-slate-500">Total GPUs allocated (market): </span>
-            {run.matched_gpu_count}
-          </li>
           {run.provider_executions.map((row: DemoProviderExecutionResponseDto, idx: number) => (
             <li
               key={`${row.provider_id}-${idx}`}
               className="rounded border border-slate-800/80 bg-slate-950/30 px-2 py-1.5"
             >
-              <span className="text-slate-400">Provider {idx + 1}: </span>
+              <span className="text-slate-400">Seller {idx + 1}: </span>
               <span className="font-mono text-slate-200">{row.provider_id}</span>
               <span className="text-slate-500"> · </span>
-              {row.gpu_count} GPU(s)
+              {row.gpu_count} GPU(s) for CADO-NFS slice
+              {row.indicative_price_per_ngh != null ? (
+                <>
+                  <span className="text-slate-500"> · </span>
+                  list ~${row.indicative_price_per_ngh.toFixed(2)}/NGH
+                </>
+              ) : null}
+              {row.provider_reliability_score != null ? (
+                <>
+                  <span className="text-slate-500"> · </span>
+                  reliability {(row.provider_reliability_score * 100).toFixed(1)}%
+                </>
+              ) : null}
+              {row.receipt_signature ? (
+                <div className="mt-1 font-mono text-[10px] text-slate-500 break-all">
+                  sig {row.receipt_signature.slice(0, 24)}...
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -252,32 +522,6 @@ function DemoExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
   );
 }
 
-function DeliveryExecutionReceiptCard({ d }: { d: ComputeDeliveryResponseDto }) {
-  return (
-    <Card className="bg-slate-900 border-slate-700 p-6 space-y-4">
-      <div>
-        <h3 className="text-slate-100 text-base font-semibold">Execution receipt · deliver &amp; compute</h3>
-        <p className="mt-1 text-xs text-slate-500">Manual delivery path: vouchers → job → remote factor run.</p>
-      </div>
-      <div className="text-xs font-mono text-slate-400 break-all space-y-1">
-        <div>
-          <span className="text-slate-500">Position: </span>
-          {d.position_id}
-        </div>
-        <div>
-          <span className="text-slate-500">Job: </span>
-          {d.job_id}
-        </div>
-        <div>
-          {d.delivered_ngh.toFixed(2)} NGH delivered · wallet remainder {d.remaining_wallet_ngh.toFixed(2)} NGH ·{' '}
-          {d.delivery_status}
-        </div>
-      </div>
-      <FactoringSummaryReceipt label="GPU / CADO-NFS output" summary={d.factoring_summary} />
-    </Card>
-  );
-}
-
 /** Match `market_simulator` GPU templates so synthetic nominations cover this window. */
 function productWindowForGpuModel(gpu: string): Pick<WindowDto, 'region' | 'sla' | 'tier'> {
   if (gpu === 'RTX 3090') return { region: 'us-west', sla: 'standard', tier: 'basic' };
@@ -301,17 +545,124 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deliveryComposite, setDeliveryComposite] = useState<string>('143');
-  const [deliveryGpuCount, setDeliveryGpuCount] = useState<number>(4);
-  const [lastDelivery, setLastDelivery] = useState<ComputeDeliveryResponseDto | null>(null);
+  /** Per settled position: optional override for which integer N to send to /factor. */
+  const [compositeByPosition, setCompositeByPosition] = useState<Record<string, string>>({});
+  /** Futures settlement / receipt horizon (sent as `target_settle_seconds`). */
+  const [contractHorizonAmount, setContractHorizonAmount] = useState<number>(1);
+  const [contractHorizonUnit, setContractHorizonUnit] = useState<HorizonUnit>('minutes');
+  const [preflightByPosition, setPreflightByPosition] = useState<
+    Record<string, ExecutionPreflightResponseDto>
+  >({});
   const [lastDemoRun, setLastDemoRun] = useState<DemoRunResponseDto | null>(null);
   const [isBusy, setIsBusy] = useState(false);
-  const [fullDemoBusy, setFullDemoBusy] = useState(false);
-  const [fullDemoTrack, setFullDemoTrack] = useState<DemoRunTrackResponseDto | null>(null);
-  const [fullDemoError, setFullDemoError] = useState<string | null>(null);
-  const fullDemoPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [gpuBackend, setGpuBackend] = useState<GpuBackendStatusDto | null>(null);
   const [gpuBackendError, setGpuBackendError] = useState<string | null>(null);
   const [gpuBackendBusy, setGpuBackendBusy] = useState(false);
+  const [sessionId, setSessionId] = useState('');
+  const [sessionMembershipCsv, setSessionMembershipCsv] = useState('member-a,member-b');
+  const [sessionWorldSize, setSessionWorldSize] = useState<number>(2);
+  const [sessionReadyMember, setSessionReadyMember] = useState('member-a');
+  const [activeSession, setActiveSession] = useState<CollectiveSessionResponseDto | null>(null);
+  const [jobReceipts, setJobReceipts] = useState<JobReceiptsResponseDto | null>(null);
+  const [qcPackageId, setQcPackageId] = useState('pkg-p1-1');
+  const [qcProviderId, setQcProviderId] = useState('provider-1');
+  const [receiptRoot, setReceiptRoot] = useState('0xabc12345');
+  const [qcRoot, setQcRoot] = useState('0xdef67890');
+  const [settlementRun, setSettlementRun] = useState<SettlementRunResponseDto | null>(null);
+  const [settlementOnchainVerify, setSettlementOnchainVerify] =
+    useState<SettlementOnchainVerifyResponseDto | null>(null);
+  const [acceptedNgh, setAcceptedNgh] = useState<number>(10);
+  const [rejectedNgh, setRejectedNgh] = useState<number>(0);
+  const [p2SchemaId, setP2SchemaId] = useState('cado_relations@1');
+  const [p2VariantMode, setP2VariantMode] = useState<'table' | 'vectors' | 'relations'>('table');
+  const [p2Mode, setP2Mode] = useState<QcModeDto>('fp_tolerant');
+  const [p2RelTol, setP2RelTol] = useState<number>(1e-4);
+  const [p2MaxUlp, setP2MaxUlp] = useState<number>(2);
+  const [p2InputA, setP2InputA] = useState('{"i":1,"x":1.0000}\n{"i":2,"x":2.0000}\n');
+  const [p2InputB, setP2InputB] = useState('{"i":1,"x":1.0000001}\n{"i":2,"x":2.0}\n');
+  const [p2HashA, setP2HashA] = useState<QcHashResponseDto | null>(null);
+  const [p2CanonicalA, setP2CanonicalA] = useState<QcCanonicalizeResponseDto | null>(null);
+  const [p2CanonicalB, setP2CanonicalB] = useState<QcCanonicalizeResponseDto | null>(null);
+  const [p2Compare, setP2Compare] = useState<QcCompareResponseDto | null>(null);
+  const [p2Adversarial, setP2Adversarial] = useState<QcAdversarialSuiteResponseDto | null>(null);
+  const [p2Matrix, setP2Matrix] = useState<QcAdversarialMatrixResponseDto | null>(null);
+  const [p2GoldReport, setP2GoldReport] = useState<QcGoldCorpusEvaluateResponseDto | null>(null);
+  const [p2GoldSavedReports, setP2GoldSavedReports] = useState<QcGoldCorpusSavedReportDto[]>([]);
+  const [p2GoldLabel, setP2GoldLabel] = useState('P2 benchmark run');
+  const [p2PassCriteria, setP2PassCriteria] = useState<QcGoldPassCriteriaDto>({
+    min_pass_rate: 0.95,
+    max_false_accept_rate: 0.02,
+    max_false_reject_rate: 0.05,
+  });
+  const [p2GoldCasesText, setP2GoldCasesText] = useState(
+    JSON.stringify(
+      [
+        {
+          case_id: 'gold-table-pass',
+          schema_id: 'table@1',
+          mode: 'fp_tolerant',
+          rel_tol: 1e-4,
+          max_ulp: 2,
+          expected_equal: true,
+          a_rows: [{ id: 'a', x: 1.0 }],
+          b_rows: [{ id: 'a', x: 1.0000000000000002 }],
+        },
+        {
+          case_id: 'gold-table-fail',
+          schema_id: 'table@1',
+          mode: 'fp_tolerant',
+          rel_tol: 1e-4,
+          max_ulp: 2,
+          expected_equal: false,
+          a_rows: [{ id: 'a', x: 1.2 }],
+          b_rows: [{ id: 'a', x: 1.5 }],
+        },
+      ],
+      null,
+      2,
+    ),
+  );
+  const [p2CaseId, setP2CaseId] = useState<string>(P2_CORPUS[0].id);
+  const [p2CorpusResults, setP2CorpusResults] = useState<P2CorpusResult[]>([]);
+  const latestReceipt = jobReceipts?.receipts[0] ?? null;
+  const p2GoldCriteriaPass = useMemo(() => {
+    if (!p2GoldReport) return null;
+    return (
+      p2GoldReport.pass_rate >= p2PassCriteria.min_pass_rate &&
+      p2GoldReport.false_accept_rate <= p2PassCriteria.max_false_accept_rate &&
+      p2GoldReport.false_reject_rate <= p2PassCriteria.max_false_reject_rate
+    );
+  }, [p2GoldReport, p2PassCriteria]);
+  const p2MatrixReady = useMemo(() => {
+    if (!p2Matrix) return null;
+    return p2Matrix.modes.every((mode) => {
+      const metrics = mode.metrics;
+      if (!metrics) return false;
+      return (
+        metrics.expectation_pass_rate >= 1 &&
+        metrics.false_accept_count === 0 &&
+        metrics.false_reject_count === 0
+      );
+    });
+  }, [p2Matrix]);
+  const p2AdversarialReady = useMemo(() => {
+    if (!p2Adversarial?.metrics) return null;
+    return (
+      p2Adversarial.metrics.expectation_pass_rate >= 1 &&
+      p2Adversarial.metrics.false_accept_count === 0 &&
+      p2Adversarial.metrics.false_reject_count === 0
+    );
+  }, [p2Adversarial]);
+  const p2PresentationReady = useMemo(() => {
+    if (
+      p2MatrixReady == null ||
+      p2AdversarialReady == null ||
+      p2GoldCriteriaPass == null
+    ) {
+      return null;
+    }
+    return p2MatrixReady && p2AdversarialReady && p2GoldCriteriaPass;
+  }, [p2AdversarialReady, p2GoldCriteriaPass, p2MatrixReady]);
 
   useEffect(() => {
     setPricePerNgh(gpuBasePrices[selectedGPU] ?? 2.45);
@@ -330,6 +681,11 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
       tier,
     }),
     [region, isoHour, sla, tier],
+  );
+
+  const contractHorizonSeconds = useMemo(
+    () => horizonToSeconds(contractHorizonAmount, contractHorizonUnit),
+    [contractHorizonAmount, contractHorizonUnit],
   );
 
   function applyProductKeyForDeposit(pk: ProductKeyDto) {
@@ -374,13 +730,22 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (fullDemoPollRef.current) {
-        clearInterval(fullDemoPollRef.current);
-        fullDemoPollRef.current = null;
-      }
-    };
+    void loadGoldCorpusReports(10).catch(() => {
+      // Keep panel usable even if report history is temporarily unavailable.
+    });
   }, []);
+
+  useEffect(() => {
+    const selectedJobId = jobId.trim();
+    if (!selectedJobId) {
+      setActiveSession(null);
+      setJobReceipts(null);
+      return;
+    }
+    void refreshP1State(selectedJobId).catch(() => {
+      // Keep panel interactive if these optional reads fail during startup/race.
+    });
+  }, [jobId]);
 
   async function run(action: () => Promise<void>) {
     setIsBusy(true);
@@ -395,82 +760,111 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
     }
   }
 
-  function stepStatusClass(status: string) {
-    if (status === 'done') return 'text-emerald-400';
-    if (status === 'running') return 'text-amber-300';
-    if (status === 'failed') return 'text-red-300';
-    return 'text-slate-500';
+  async function refreshP1State(candidateJobId?: string) {
+    const selectedJobId = (candidateJobId ?? jobId).trim();
+    if (!selectedJobId) return;
+    const [sessions, receipts] = await Promise.all([
+      SessionApi.listSessions(selectedJobId),
+      JobApi.getReceipts(selectedJobId),
+    ]);
+    setActiveSession(sessions[0] ?? null);
+    setJobReceipts(receipts);
   }
 
-  async function startOneClickFullDemo() {
-    if (fullDemoPollRef.current) {
-      clearInterval(fullDemoPollRef.current);
-      fullDemoPollRef.current = null;
-    }
-    setFullDemoError(null);
-    setFullDemoBusy(true);
-    setFullDemoTrack(null);
-    try {
-      const { run_id } = await MarketApi.startFullDemo({
-        composite: deliveryComposite.trim(),
-        region: productKey.region,
-        iso_hour: productKey.iso_hour,
-        sla: productKey.sla,
-        tier: productKey.tier,
-        quantity_ngh: quantityNgh,
-        price_per_ngh: pricePerNgh,
-        package_size_ngh: 10,
-        gpu_model_label: selectedGPU,
-        target_settle_seconds: 300,
+  function loadP2Case(caseId: string) {
+    const row = P2_CORPUS.find((c) => c.id === caseId);
+    if (!row) return;
+    setP2CaseId(row.id);
+    setP2SchemaId(row.schemaId);
+    setP2Mode(row.mode);
+    setP2RelTol(row.relTol ?? 1e-4);
+    setP2MaxUlp(row.maxUlp ?? 2);
+    setP2InputA(row.inputA);
+    setP2InputB(row.inputB);
+    setP2Compare(null);
+    setP2CanonicalA(null);
+    setP2CanonicalB(null);
+    setP2HashA(null);
+    setStatus(`Loaded P2 case: ${row.title}`);
+  }
+
+  async function runP2Corpus() {
+    const results: P2CorpusResult[] = [];
+    for (const row of P2_CORPUS) {
+      let observedEqual = false;
+      let detail = '';
+      if (row.strategy === 'compare') {
+        const res = await QcApi.compare({
+          schema_id: row.schemaId,
+          mode: row.mode,
+          a: row.inputA,
+          b: row.inputB,
+          rel_tol: row.relTol,
+          max_ulp: row.maxUlp,
+        });
+        observedEqual = res.equal;
+        detail = `differences=${res.summary.differences}, rel_err_max=${res.summary.rel_err_max}, ulp_max=${res.summary.ulp_max}`;
+      } else {
+        const [aCanon, bCanon] = await Promise.all([
+          QcApi.canonicalize({
+            schema_id: row.schemaId,
+            body: row.inputA,
+            input_format: row.inputFormatA ?? 'jsonl',
+          }),
+          QcApi.canonicalize({
+            schema_id: row.schemaId,
+            body: row.inputB,
+            input_format: row.inputFormatB ?? 'jsonl',
+          }),
+        ]);
+        observedEqual = aCanon.merkle_root === bCanon.merkle_root;
+        detail = `root_a=${aCanon.merkle_root.slice(0, 12)}..., root_b=${bCanon.merkle_root.slice(0, 12)}...`;
+      }
+      results.push({
+        id: row.id,
+        title: row.title,
+        expectedEqual: row.expectEqual,
+        observedEqual,
+        passed: observedEqual === row.expectEqual,
+        detail,
       });
-
-      const pollOnce = async () => {
-        try {
-          let track = await MarketApi.getDemoRunProgress(run_id, { slim: true });
-          if (track.overall_status === 'completed' && !track.result) {
-            track = await MarketApi.getDemoRunProgress(run_id);
-          }
-          setFullDemoTrack(track);
-          if (track.overall_status === 'completed' && track.result) {
-            setLastDemoRun(track.result);
-            if (track.job_id) setJobId(track.job_id);
-            setStatus(
-              `One-click demo complete · job ${track.job_id} · tx ${track.result.blockchain_anchor.tx_hash.slice(0, 12)}…`,
-            );
-            await refresh();
-            setFullDemoBusy(false);
-            if (fullDemoPollRef.current) {
-              clearInterval(fullDemoPollRef.current);
-              fullDemoPollRef.current = null;
-            }
-            return;
-          }
-          if (track.overall_status === 'failed') {
-            setFullDemoError(track.error ?? 'Demo run failed');
-            setFullDemoBusy(false);
-            if (fullDemoPollRef.current) {
-              clearInterval(fullDemoPollRef.current);
-              fullDemoPollRef.current = null;
-            }
-          }
-        } catch (err) {
-          setFullDemoError(err instanceof Error ? err.message : String(err));
-          setFullDemoBusy(false);
-          if (fullDemoPollRef.current) {
-            clearInterval(fullDemoPollRef.current);
-            fullDemoPollRef.current = null;
-          }
-        }
-      };
-
-      await pollOnce();
-      fullDemoPollRef.current = setInterval(() => {
-        void pollOnce();
-      }, 650);
-    } catch (err) {
-      setFullDemoError(err instanceof Error ? err.message : String(err));
-      setFullDemoBusy(false);
     }
+    setP2CorpusResults(results);
+    const passCount = results.filter((r) => r.passed).length;
+    setStatus(`P2 corpus complete: ${passCount}/${results.length} cases passed`);
+  }
+
+  async function loadGoldCorpusReports(limit = 10): Promise<number> {
+    const rows = await QcApi.listGoldCorpusReports(limit);
+    setP2GoldSavedReports(rows.reports);
+    return rows.count;
+  }
+
+  function parseGoldCasesInput(): QcGoldCorpusCaseDto[] {
+    const parsed = JSON.parse(p2GoldCasesText) as QcGoldCorpusCaseDto[];
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error('Gold corpus JSON must be a non-empty array.');
+    }
+    return parsed;
+  }
+
+  function compositeForPosition(positionId: string): string {
+    const override = compositeByPosition[positionId];
+    if (override != null && override.trim() !== '') return override.trim();
+    return deliveryComposite.trim();
+  }
+
+  async function loadExecutionPreflight(positionId: string, candidateJobId?: string) {
+    const selectedJobId = (candidateJobId ?? jobId).trim();
+    if (!selectedJobId) {
+      throw new Error('Enter a job ID first.');
+    }
+    const report = await MarketApi.getExecutionPreflight(positionId, selectedJobId);
+    setPreflightByPosition((prev) => ({ ...prev, [positionId]: report }));
+    if (!report.ready_to_execute) {
+      throw new Error(`Execution blocked: ${report.reasons.join(' | ')}`);
+    }
+    return report;
   }
 
   return (
@@ -496,8 +890,8 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
                 GPU factoring backend
               </div>
               <p className="mt-1 text-xs text-slate-400">
-                One-click demo calls your CADO server (<code className="text-slate-300">remote_factor_server</code>
-                ). This checks that CoreIndex can open a TCP connection to the URL you configured in{' '}
+                Execution calls your CADO server (<code className="text-slate-300">remote_factor_server</code>). This
+                checks that CoreIndex can open a TCP connection to the URL you configured in{' '}
                 <code className="text-slate-300">apps/api/.env</code>.
               </p>
             </div>
@@ -548,57 +942,63 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
         </div>
 
         <div className="mt-5 rounded-lg border border-cyan-800/50 bg-cyan-950/20 p-4 space-y-4">
-          <div>
-            <div className="text-sm text-cyan-200">One-click demo (easiest)</div>
-            <p className="mt-1 text-xs text-cyan-100/80">
-              Creates the job, opens a buy position, settles, matches providers against the live synthetic
-              book (unless the API sets <code className="text-cyan-200/90">DEMO_REQUIRE_REAL_PROVIDERS</code>),
-              runs the remote <strong>ECM-then-CADO-NFS</strong> pipeline on the allocated GPUs, then anchors
-              verification. Tiny composites (e.g. 143 = 11×13) often complete in ECM only—
-              <code className="text-cyan-200/90">cado_runs</code> may be empty; that is normal. The run uses the{' '}
-              <strong>current UTC hour</strong> so the window lines up with the market simulator. Composite must be
-              digits only (at least 2).
-            </p>
-            <Button
-              className="mt-3 w-full bg-cyan-600 hover:bg-cyan-700 sm:w-auto"
-              disabled={
-                fullDemoBusy ||
-                isBusy ||
-                !/^\d{2,}$/.test(deliveryComposite.trim())
-              }
-              onClick={() => void startOneClickFullDemo()}
-            >
-              {fullDemoBusy ? 'Demo running…' : 'Run entire demo (one click)'}
-            </Button>
-            {fullDemoError ? (
-              <div className="mt-2 text-xs text-red-300">{fullDemoError}</div>
-            ) : null}
+          <div className="text-sm text-cyan-200">Execution controls</div>
+          <p className="text-xs text-cyan-100/80">
+            Trade first, settle to vouchers, escrow to a job, then execute. CADO-NFS still runs on matched
+            GPUs across providers; this panel follows the production trading path.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1 sm:col-span-2">
+              <div className="text-xs font-medium text-cyan-200/90">Contract horizon</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  type="number"
+                  min={contractHorizonUnit === 'seconds' ? 30 : 1}
+                  max={
+                    contractHorizonUnit === 'seconds'
+                      ? MAX_TARGET_SETTLE_SECONDS
+                      : contractHorizonUnit === 'minutes'
+                        ? Math.floor(MAX_TARGET_SETTLE_SECONDS / 60)
+                        : contractHorizonUnit === 'days'
+                          ? 366
+                          : 12
+                  }
+                  step={1}
+                  value={contractHorizonAmount}
+                  onChange={(e) => setContractHorizonAmount(Number(e.target.value))}
+                  className="w-28 bg-slate-950 border-cyan-900/50 text-sm"
+                  aria-label="Horizon amount"
+                />
+                <Select value={contractHorizonUnit} onValueChange={(v) => setContractHorizonUnit(v as HorizonUnit)}>
+                  <SelectTrigger className="w-[11rem] bg-slate-950 border-cyan-900/50 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="seconds">Seconds</SelectItem>
+                    <SelectItem value="minutes">Minutes</SelectItem>
+                    <SelectItem value="days">Days</SelectItem>
+                    <SelectItem value="months">Months (30d each)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="text-[10px] text-cyan-100/60">
+                Horizon: {contractHorizonSeconds.toLocaleString()}s (
+                {contractHorizonUnit === 'months' ? 'months are 30-day periods' : 'min 30s, max ~366 days'}).
+              </div>
+            </div>
           </div>
-          {fullDemoTrack?.steps?.length ? (
-            <div className="rounded-md border border-cyan-900/40 bg-slate-950/40 p-3">
-              <div className="text-xs font-medium text-cyan-200/90 mb-2">Live steps</div>
-              <ul className="space-y-2 text-xs">
-                {fullDemoTrack.steps.map((step) => (
-                  <li key={step.step_id} className="flex flex-col gap-0.5 border-b border-slate-800/80 pb-2 last:border-0 last:pb-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-200">{step.label}</span>
-                      <span className={`uppercase tracking-wide ${stepStatusClass(step.status)}`}>
-                        {step.status}
-                      </span>
-                    </div>
-                    {step.detail ? (
-                      <span className="text-slate-500 font-mono break-all">{step.detail}</span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          <div className="border-t border-cyan-900/30 pt-3">
-            <div className="text-xs text-cyan-200/90">Manual path</div>
-            <div className="mt-1 text-xs text-cyan-100/70">
-              Or use Buy Exposure, then Run Full Demo Flow on a position when you already have a job ID.
-            </div>
+          <div className="space-y-1">
+            <div className="text-xs font-medium text-cyan-200/90">Number to factor</div>
+            <Input
+              value={deliveryComposite}
+              onChange={(e) => setDeliveryComposite(e.target.value)}
+              className="bg-slate-950 border-cyan-900/50 font-mono text-sm"
+              placeholder="Digits only, e.g. 143"
+              aria-label="Composite integer for execution"
+            />
+            {!validComposite(deliveryComposite) ? (
+              <div className="text-[11px] text-amber-200/90">Enter at least two digits (no spaces or letters).</div>
+            ) : null}
           </div>
         </div>
 
@@ -741,71 +1141,119 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
                       <div className="text-xs text-slate-500">{position.position_id}</div>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                      <Badge
-                        variant="outline"
-                        className={
-                          position.status === 'settled'
-                            ? 'border-emerald-800 text-emerald-300'
-                            : 'border-amber-800 text-amber-300'
-                        }
-                      >
-                        {position.status}
-                      </Badge>
-                      <Button
-                        size="sm"
-                        className="bg-emerald-600 hover:bg-emerald-700"
-                        disabled={isBusy || position.status === 'settled'}
-                        onClick={() =>
-                          void run(async () => {
-                            const settled = await MarketApi.settlePosition(position.position_id);
-                            setStatus(`Settled position ${settled.position_id} into vouchers`);
-                          })
-                        }
-                      >
-                        Settle to Vouchers
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="bg-violet-600 hover:bg-violet-700"
-                        disabled={isBusy || position.status !== 'settled' || !jobId.trim()}
-                        onClick={() =>
-                          void run(async () => {
-                            const result = await MarketApi.deliverPosition(position.position_id, {
-                              job_id: jobId.trim(),
-                              gpu_count: deliveryGpuCount,
-                              composite: deliveryComposite.trim(),
-                            });
-                            setLastDelivery(result);
-                            setStatus(
-                              `Delivered ${result.delivered_ngh.toFixed(2)} NGH and completed GPU factoring run`,
+                    <div className="flex flex-col gap-3 lg:flex-1 lg:min-w-0">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                          Number to factor (this contract)
+                        </div>
+                        <Input
+                          value={compositeByPosition[position.position_id] ?? ''}
+                          onChange={(e) =>
+                            setCompositeByPosition((prev) => ({
+                              ...prev,
+                              [position.position_id]: e.target.value,
+                            }))
+                          }
+                          placeholder={deliveryComposite || 'e.g. 143'}
+                          className="bg-slate-800 border-slate-700 font-mono text-xs h-8"
+                          aria-label={`Composite to factor for position ${position.position_id}`}
+                        />
+                        <div className="text-[10px] text-slate-500">
+                          Leave blank to use the default under &quot;Deposit vouchers&quot; (
+                          {validComposite(deliveryComposite) ? deliveryComposite : 'set a valid default'}).
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Badge
+                          variant="outline"
+                          className={
+                            position.status === 'settled'
+                              ? 'border-emerald-800 text-emerald-300'
+                              : 'border-amber-800 text-amber-300'
+                          }
+                        >
+                          {position.status}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          className="bg-emerald-600 hover:bg-emerald-700"
+                          disabled={isBusy || position.status === 'settled'}
+                          onClick={() =>
+                            void run(async () => {
+                              const settled = await MarketApi.settlePosition(position.position_id);
+                              setStatus(`Settled position ${settled.position_id} into vouchers`);
+                            })
+                          }
+                        >
+                          Settle to Vouchers
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="bg-cyan-600 hover:bg-cyan-700"
+                          disabled={
+                            isBusy ||
+                            !jobId.trim() ||
+                            !validComposite(compositeForPosition(position.position_id))
+                          }
+                          onClick={() =>
+                            void run(async () => {
+                              await loadExecutionPreflight(position.position_id, jobId);
+                              const result = await MarketApi.executeContract(position.position_id, {
+                                job_id: jobId.trim(),
+                                composite: compositeForPosition(position.position_id),
+                                target_settle_seconds: contractHorizonSeconds,
+                                auto_settle_if_open: false,
+                              });
+                              setLastDemoRun(result);
+                              setStatus(
+                                `Execution complete · tx ${result.blockchain_anchor.tx_hash.slice(0, 12)}... · verification ${result.verification_passed ? 'passed' : 'failed'}`,
+                              );
+                            })
+                          }
+                        >
+                          Execute Contract (CADO-NFS)
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-slate-700 bg-slate-900"
+                          disabled={isBusy || !jobId.trim()}
+                          onClick={() =>
+                            void run(async () => {
+                              const report = await loadExecutionPreflight(position.position_id, jobId);
+                              setStatus(
+                                report.ready_to_execute
+                                  ? `Preflight passed · ${report.matching_provider_count} providers · ${report.total_available_gpus} GPUs visible`
+                                  : `Preflight failed · ${report.reasons.join(' | ')}`,
+                              );
+                            })
+                          }
+                        >
+                          Run Preflight
+                        </Button>
+                      </div>
+                      {preflightByPosition[position.position_id] ? (
+                        <div className="rounded border border-slate-800/80 bg-slate-950/40 p-2 text-[11px]">
+                          {(() => {
+                            const report = preflightByPosition[position.position_id];
+                            return (
+                              <div className="space-y-1 text-slate-400">
+                                <div>
+                                  <span className="text-slate-500">Preflight: </span>
+                                  <span className={report.ready_to_execute ? 'text-emerald-300' : 'text-amber-300'}>
+                                    {report.ready_to_execute ? 'ready' : 'blocked'}
+                                  </span>
+                                  <span className="text-slate-500"> · Escrowed </span>
+                                  {report.deposited_ngh.toFixed(2)} / required {report.required_ngh.toFixed(2)} NGH
+                                </div>
+                                {!report.ready_to_execute ? (
+                                  <div className="text-amber-200/90">{report.reasons.join(' | ')}</div>
+                                ) : null}
+                              </div>
                             );
-                          })
-                        }
-                      >
-                        Deliver and Run Compute
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="bg-cyan-600 hover:bg-cyan-700"
-                        disabled={isBusy || !jobId.trim()}
-                        onClick={() =>
-                          void run(async () => {
-                            const result = await MarketApi.runDemo(position.position_id, {
-                              job_id: jobId.trim(),
-                              composite: deliveryComposite.trim(),
-                              target_settle_seconds: 300,
-                              auto_settle_if_open: true,
-                            });
-                            setLastDemoRun(result);
-                            setStatus(
-                              `Demo run complete · tx ${result.blockchain_anchor.tx_hash.slice(0, 12)}... · verification ${result.verification_passed ? 'passed' : 'failed'}`,
-                            );
-                          })
-                        }
-                      >
-                        Run Full Demo Flow
-                      </Button>
+                          })()}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -822,7 +1270,7 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
       <div className="space-y-6">
         <Card className="bg-slate-900 border-slate-800 p-6">
           <div className="text-slate-100">Voucher balances</div>
-          <div className="mt-3 space-y-3">
+          <div className="mt-3 h-72 overflow-y-scroll overscroll-contain space-y-3 pr-2">
             {vouchers.length ? (
               vouchers.map((voucher, index) => (
                 <div
@@ -867,8 +1315,8 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
               the voucher row you want.
             </p>
             <p>
-              The one-click demo already escrows vouchers for its job; you usually do not need to
-              deposit again for that same run.
+              Execution now uses strict preflight checks: job must exist, the job key must match this
+              contract key, and escrowed vouchers must cover required NGH before compute starts.
             </p>
           </div>
 
@@ -879,6 +1327,32 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
               placeholder="job-123"
               className="bg-slate-800 border-slate-700"
             />
+            <Button
+              variant="outline"
+              className="w-full border-slate-700 bg-slate-900"
+              disabled={isBusy}
+              onClick={() =>
+                void run(async () => {
+                  const generated = `job-${Date.now()}`;
+                  const created = await JobApi.createJob({
+                    job_id: generated,
+                    window: productKey,
+                    package_index: [
+                      {
+                        package_id: `pkg-${Math.random().toString(36).slice(2, 10)}`,
+                        size_estimate_ngh: 10,
+                        first_output_estimate_seconds: 60,
+                        metadata: { gpu_name: selectedGPU, flow: 'trader-path' },
+                      },
+                    ],
+                  });
+                  setJobId(created.job_id);
+                  setStatus(`Created job ${created.job_id} for ${formatProductKey(created.window)}`);
+                })
+              }
+            >
+              Create Job for Current Key
+            </Button>
             <Button
               className="w-full bg-violet-600 hover:bg-violet-700"
               disabled={isBusy || !jobId.trim()}
@@ -897,25 +1371,1032 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             >
               Deposit ({formatProductKey(productKey)})
             </Button>
-            <Input
-              type="number"
-              min={1}
-              max={4}
-              step={1}
-              value={deliveryGpuCount}
-              onChange={(e) => setDeliveryGpuCount(Number(e.target.value))}
-              className="bg-slate-800 border-slate-700"
-              placeholder="GPU count (1-4)"
-            />
+            <div className="text-xs text-slate-500">Default composite for execution and any position row left blank.</div>
             <Input
               value={deliveryComposite}
               onChange={(e) => setDeliveryComposite(e.target.value)}
-              className="bg-slate-800 border-slate-700"
+              className="bg-slate-800 border-slate-700 font-mono"
               placeholder="e.g. 143 (11×13) for a quick GPU check"
             />
             <div className="text-xs text-slate-500">
-              Provider pairing and GPU count are now matched automatically by the market at execution.
+              Provider pairing and GPU count are matched by the market at execution; you choose N to factor per contract
+              above or override on each open position card.
             </div>
+          </div>
+        </Card>
+
+        <Card className="bg-slate-900 border-slate-800 p-6">
+          <div className="text-slate-100">P1 Operations: Sessions, QC, Settlement</div>
+          <p className="mt-2 text-xs text-slate-400">
+            Run collective session lifecycle, post QC outcomes, and complete settlement against the current job.
+          </p>
+          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-3">
+              <div className="text-sm text-slate-200">Collective session</div>
+              <Input
+                value={sessionId}
+                onChange={(e) => setSessionId(e.target.value)}
+                placeholder={jobId.trim() ? `sess-${jobId.trim()}` : 'sess-job-123'}
+                className="bg-slate-800 border-slate-700"
+              />
+              <Input
+                value={sessionMembershipCsv}
+                onChange={(e) => setSessionMembershipCsv(e.target.value)}
+                placeholder="member-a,member-b"
+                className="bg-slate-800 border-slate-700"
+              />
+              <Input
+                type="number"
+                min={1}
+                value={sessionWorldSize}
+                onChange={(e) => setSessionWorldSize(Math.max(1, Number(e.target.value) || 1))}
+                className="bg-slate-800 border-slate-700"
+              />
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Button
+                  size="sm"
+                  className="bg-cyan-700 hover:bg-cyan-800"
+                  disabled={isBusy || !jobId.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      const members = sessionMembershipCsv
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                      const sid = sessionId.trim() || `sess-${jobId.trim()}`;
+                      const created = await SessionApi.createSession({
+                        session_id: sid,
+                        job_id: jobId.trim(),
+                        ...productKey,
+                        world_size: Math.max(sessionWorldSize, members.length || 1),
+                        membership: members.length ? members : ['member-a'],
+                      });
+                      setSessionId(created.session_id);
+                      setActiveSession(created);
+                      setStatus(`Session created: ${created.session_id}`);
+                    })
+                  }
+                >
+                  Create session
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy || !sessionId.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      await SessionApi.finalizeSession(sessionId.trim());
+                      await refreshP1State(jobId);
+                      setStatus(`Session finalized: ${sessionId.trim()}`);
+                    })
+                  }
+                >
+                  Finalize
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
+                <Input
+                  value={sessionReadyMember}
+                  onChange={(e) => setSessionReadyMember(e.target.value)}
+                  placeholder="member-a"
+                  className="bg-slate-800 border-slate-700"
+                />
+                <Button
+                  size="sm"
+                  className="bg-emerald-700 hover:bg-emerald-800"
+                  disabled={isBusy || !sessionId.trim() || !sessionReadyMember.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      const row = await SessionApi.markReady(sessionId.trim(), sessionReadyMember.trim());
+                      setActiveSession(row);
+                      setStatus(`Ready attested: ${sessionReadyMember.trim()} (${row.ready_count}/${row.world_size})`);
+                    })
+                  }
+                >
+                  Mark ready
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy || !jobId.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      await refreshP1State(jobId);
+                      setStatus(`Loaded session state for ${jobId.trim()}`);
+                    })
+                  }
+                >
+                  Reload
+                </Button>
+              </div>
+              {activeSession ? (
+                <div className="rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-400">
+                  <div>
+                    <span className="text-slate-500">Session:</span> {activeSession.session_id}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">State:</span> {activeSession.state}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Ready:</span> {activeSession.ready_count}/{activeSession.world_size}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Members:</span> {activeSession.membership.join(', ')}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Ready members:</span>{' '}
+                    {activeSession.ready_members.length ? activeSession.ready_members.join(', ') : 'none yet'}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-3">
+              <div className="text-sm text-slate-200">QC + settlement</div>
+              <Input
+                value={qcPackageId}
+                onChange={(e) => setQcPackageId(e.target.value)}
+                placeholder="package id"
+                className="bg-slate-800 border-slate-700"
+              />
+              <Input
+                value={qcProviderId}
+                onChange={(e) => setQcProviderId(e.target.value)}
+                placeholder="provider id"
+                className="bg-slate-800 border-slate-700"
+              />
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy || !jobId.trim() || !qcPackageId.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      await QcApi.submitDuplicate({
+                        job_id: jobId.trim(),
+                        package_id: qcPackageId.trim(),
+                        provider_id: qcProviderId.trim() || undefined,
+                        verdict: 'pass',
+                        detail: 'UI duplicate check pass',
+                      });
+                      setStatus(`QC duplicate recorded for ${qcPackageId.trim()}`);
+                    })
+                  }
+                >
+                  QC duplicate
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy || !jobId.trim() || !qcPackageId.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      await QcApi.submitSpot({
+                        job_id: jobId.trim(),
+                        package_id: qcPackageId.trim(),
+                        provider_id: qcProviderId.trim() || undefined,
+                        verdict: 'pass',
+                        detail: 'UI spot check pass',
+                      });
+                      setStatus(`QC spot recorded for ${qcPackageId.trim()}`);
+                    })
+                  }
+                >
+                  QC spot
+                </Button>
+              </div>
+              <Input
+                value={receiptRoot}
+                onChange={(e) => setReceiptRoot(e.target.value)}
+                placeholder="receipt root"
+                className="bg-slate-800 border-slate-700 font-mono"
+              />
+              <Input
+                value={qcRoot}
+                onChange={(e) => setQcRoot(e.target.value)}
+                placeholder="qc root"
+                className="bg-slate-800 border-slate-700 font-mono"
+              />
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Button
+                  size="sm"
+                  className="bg-violet-700 hover:bg-violet-800"
+                  disabled={isBusy || !jobId.trim() || !receiptRoot.trim() || !qcRoot.trim()}
+                  onClick={() =>
+                    void run(async () => {
+                      const anchored = await SettlementApi.anchor({
+                        job_id: jobId.trim(),
+                        receipt_root: receiptRoot.trim(),
+                        qc_root: qcRoot.trim(),
+                        note: 'anchored from market panel',
+                      });
+                      setSettlementRun(anchored);
+                      setSettlementOnchainVerify(null);
+                      setStatus(`Settlement anchored: ${anchored.settlement_id}`);
+                    })
+                  }
+                >
+                  Anchor settlement
+                </Button>
+                <Button
+                  size="sm"
+                  className="bg-emerald-700 hover:bg-emerald-800"
+                  disabled={isBusy || !jobId.trim() || !settlementRun?.settlement_id}
+                  onClick={() =>
+                    void run(async () => {
+                      const settled = await SettlementApi.pay({
+                        job_id: jobId.trim(),
+                        settlement_id: settlementRun!.settlement_id,
+                        accepted_ngh: acceptedNgh,
+                        rejected_ngh: rejectedNgh,
+                      });
+                      setSettlementRun(settled);
+                      setStatus(`Settlement paid: ${settled.settlement_id} (${settled.state})`);
+                    })
+                  }
+                >
+                  Pay settlement
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy || !settlementRun?.settlement_id}
+                  onClick={() =>
+                    void run(async () => {
+                      const verify = await SettlementApi.verifyOnchain(settlementRun!.settlement_id);
+                      setSettlementOnchainVerify(verify);
+                      setStatus(
+                        verify.verified
+                          ? `On-chain verification passed · tx ${verify.tx_hash?.slice(0, 12) ?? 'n/a'}...`
+                          : `On-chain verification failed · ${verify.reason ?? 'unknown reason'}`,
+                      );
+                    })
+                  }
+                >
+                  Verify on-chain anchor
+                </Button>
+              </div>
+              {latestReceipt?.verification_hash ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-slate-700 bg-slate-900"
+                  disabled={isBusy}
+                  onClick={() => {
+                    setReceiptRoot(latestReceipt.verification_hash ?? receiptRoot);
+                    setStatus('Loaded receipt root from latest receipt verification hash');
+                  }}
+                >
+                  Use latest receipt hash as root
+                </Button>
+              ) : null}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Input
+                  type="number"
+                  min={0}
+                  value={acceptedNgh}
+                  onChange={(e) => setAcceptedNgh(Math.max(0, Number(e.target.value) || 0))}
+                  className="bg-slate-800 border-slate-700"
+                  placeholder="accepted ngh"
+                />
+                <Input
+                  type="number"
+                  min={0}
+                  value={rejectedNgh}
+                  onChange={(e) => setRejectedNgh(Math.max(0, Number(e.target.value) || 0))}
+                  className="bg-slate-800 border-slate-700"
+                  placeholder="rejected ngh"
+                />
+              </div>
+              {settlementRun ? (
+                <div className="rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-400">
+                  <div>
+                    <span className="text-slate-500">Settlement:</span> {settlementRun.settlement_id}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">State:</span> {settlementRun.state}
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Accepted/Rejected:</span> {settlementRun.accepted_ngh} /{' '}
+                    {settlementRun.rejected_ngh} NGH
+                  </div>
+                  {settlementRun.anchor_hash ? (
+                    <div className="font-mono break-all">
+                      <span className="text-slate-500">Anchor hash:</span> {settlementRun.anchor_hash}
+                    </div>
+                  ) : null}
+                  {settlementRun.blockchain_anchor?.tx_hash ? (
+                    <div className="font-mono break-all">
+                      <span className="text-slate-500">Tx hash:</span> {settlementRun.blockchain_anchor.tx_hash}
+                    </div>
+                  ) : null}
+                  {settlementOnchainVerify ? (
+                    <div>
+                      <span className="text-slate-500">On-chain verify:</span>{' '}
+                      <span
+                        className={
+                          settlementOnchainVerify.verified ? 'text-emerald-300' : 'text-amber-300'
+                        }
+                      >
+                        {settlementOnchainVerify.verified ? 'verified' : 'not verified'}
+                      </span>
+                      {settlementOnchainVerify.reason ? ` · ${settlementOnchainVerify.reason}` : ''}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm text-slate-200">Receipt bundle</div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700 bg-slate-900"
+                disabled={isBusy || !jobId.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    await refreshP1State(jobId);
+                    setStatus(`Loaded receipts for ${jobId.trim()}`);
+                  })
+                }
+              >
+                Load receipts
+              </Button>
+            </div>
+            {jobReceipts ? (
+              <div className="text-xs text-slate-400">
+                <div>
+                  <span className="text-slate-500">Count:</span> {jobReceipts.receipt_count}
+                </div>
+                <div className="mt-2 max-h-28 overflow-y-auto overscroll-contain space-y-1 pr-1">
+                  {jobReceipts.receipts.length ? (
+                    jobReceipts.receipts.map((row) => (
+                      <div key={row.event_id} className="rounded border border-slate-800/80 px-2 py-1">
+                        <div className="font-mono text-[10px] text-slate-500">{row.event_id.slice(0, 16)}...</div>
+                        <div>
+                          providers {row.provider_count} · delivered {row.delivered_ngh.toFixed(2)} NGH
+                          {row.settlement_status ? ` · ${row.settlement_status}` : ''}
+                        </div>
+                        {row.verification_hash ? (
+                          <div className="font-mono text-[10px] text-slate-500 break-all">
+                            {row.verification_hash}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-slate-500">No receipts yet for this job.</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-500">Choose a job and load receipts.</div>
+            )}
+          </div>
+        </Card>
+
+        <Card className="bg-slate-900 border-slate-800 p-6">
+          <div className="text-slate-100">P2 Verification: Canonicalization & Equivalence</div>
+          <p className="mt-2 text-xs text-slate-400">
+            Validate schema-aware hashing and comparison behavior across small output variations. This is the
+            cross-arch correctness surface for duplicate and spot checks.
+          </p>
+          <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-3 text-[11px] text-slate-300">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-slate-200">P2 presentation readiness</div>
+              <Button
+                size="sm"
+                className="bg-emerald-700 hover:bg-emerald-800"
+                disabled={isBusy || !p2SchemaId.trim() || !p2InputA.trim() || !p2GoldCasesText.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    const baseRows = parseJsonlRows(p2InputA);
+                    const [suite, matrix, report] = await Promise.all([
+                      QcApi.runAdversarialSuite({
+                        schema_id: p2SchemaId.trim(),
+                        mode: p2Mode,
+                        rel_tol: p2RelTol,
+                        max_ulp: p2MaxUlp,
+                        variant_mode: p2VariantMode,
+                        base_rows: baseRows,
+                      }),
+                      QcApi.runAdversarialMatrix({
+                        schema_id: p2SchemaId.trim(),
+                        rel_tol: p2RelTol,
+                        max_ulp: p2MaxUlp,
+                        variant_mode: p2VariantMode,
+                        base_rows: baseRows,
+                      }),
+                      QcApi.evaluateGoldCorpus({ cases: parseGoldCasesInput() }),
+                    ]);
+                    setP2Adversarial(suite);
+                    setP2Matrix(matrix);
+                    setP2GoldReport(report);
+                    const matrixOk = matrix.modes.every((m) => {
+                      const metrics = m.metrics;
+                      return (
+                        !!metrics &&
+                        metrics.expectation_pass_rate >= 1 &&
+                        metrics.false_accept_count === 0 &&
+                        metrics.false_reject_count === 0
+                      );
+                    });
+                    const adversarialOk =
+                      (suite.metrics?.expectation_pass_rate ?? 0) >= 1 &&
+                      (suite.metrics?.false_accept_count ?? 1) === 0 &&
+                      (suite.metrics?.false_reject_count ?? 1) === 0;
+                    const goldOk =
+                      report.pass_rate >= p2PassCriteria.min_pass_rate &&
+                      report.false_accept_rate <= p2PassCriteria.max_false_accept_rate &&
+                      report.false_reject_rate <= p2PassCriteria.max_false_reject_rate;
+                    setStatus(
+                      matrixOk && adversarialOk && goldOk
+                        ? 'P2 presentation check passed'
+                        : 'P2 presentation check found gaps',
+                    );
+                  })
+                }
+              >
+                Run presentation check
+              </Button>
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-1 md:grid-cols-4">
+              <div>
+                <span className="text-slate-500">Overall:</span>{' '}
+                <span
+                  className={
+                    p2PresentationReady == null
+                      ? 'text-slate-300'
+                      : p2PresentationReady
+                        ? 'text-emerald-300'
+                        : 'text-amber-300'
+                  }
+                >
+                  {p2PresentationReady == null ? 'not run' : p2PresentationReady ? 'READY' : 'NOT READY'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500">Matrix:</span>{' '}
+                <span className={p2MatrixReady == null ? 'text-slate-300' : p2MatrixReady ? 'text-emerald-300' : 'text-amber-300'}>
+                  {p2MatrixReady == null ? 'n/a' : p2MatrixReady ? 'PASS' : 'FAIL'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500">Adversarial:</span>{' '}
+                <span
+                  className={
+                    p2AdversarialReady == null ? 'text-slate-300' : p2AdversarialReady ? 'text-emerald-300' : 'text-amber-300'
+                  }
+                >
+                  {p2AdversarialReady == null ? 'n/a' : p2AdversarialReady ? 'PASS' : 'FAIL'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500">Gold criteria:</span>{' '}
+                <span
+                  className={
+                    p2GoldCriteriaPass == null ? 'text-slate-300' : p2GoldCriteriaPass ? 'text-emerald-300' : 'text-amber-300'
+                  }
+                >
+                  {p2GoldCriteriaPass == null ? 'n/a' : p2GoldCriteriaPass ? 'PASS' : 'FAIL'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-5">
+            <Input
+              value={p2SchemaId}
+              onChange={(e) => setP2SchemaId(e.target.value)}
+              placeholder="schema id"
+              className="bg-slate-800 border-slate-700 md:col-span-2"
+            />
+            <Select value={p2Mode} onValueChange={(v) => setP2Mode(v as QcModeDto)}>
+              <SelectTrigger className="bg-slate-800 border-slate-700">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="bit_exact">bit_exact</SelectItem>
+                <SelectItem value="fp_tolerant">fp_tolerant</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={p2VariantMode} onValueChange={(v) => setP2VariantMode(v as 'table' | 'vectors' | 'relations')}>
+              <SelectTrigger className="bg-slate-800 border-slate-700">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="table">table adversarial set</SelectItem>
+                <SelectItem value="vectors">vectors adversarial set</SelectItem>
+                <SelectItem value="relations">relations adversarial set</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                type="number"
+                min={0}
+                step={0.000001}
+                value={p2RelTol}
+                onChange={(e) => setP2RelTol(Math.max(0, Number(e.target.value) || 0))}
+                className="bg-slate-800 border-slate-700 text-xs"
+                placeholder="rel_tol"
+              />
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                value={p2MaxUlp}
+                onChange={(e) => setP2MaxUlp(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                className="bg-slate-800 border-slate-700 text-xs"
+                placeholder="max_ulp"
+              />
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto_auto]">
+            <Select value={p2CaseId} onValueChange={(v) => setP2CaseId(v)}>
+              <SelectTrigger className="bg-slate-800 border-slate-700">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {P2_CORPUS.map((row) => (
+                  <SelectItem key={row.id} value={row.id}>
+                    {row.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-slate-700 bg-slate-900"
+              disabled={isBusy}
+              onClick={() => loadP2Case(p2CaseId)}
+            >
+              Load case
+            </Button>
+            <Button
+              size="sm"
+              className="bg-indigo-700 hover:bg-indigo-800"
+              disabled={isBusy}
+              onClick={() =>
+                void run(async () => {
+                  await runP2Corpus();
+                })
+              }
+            >
+              Run P2 corpus
+            </Button>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            {P2_CORPUS.find((row) => row.id === p2CaseId)?.description ?? ''}
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <textarea
+              value={p2InputA}
+              onChange={(e) => setP2InputA(e.target.value)}
+              className="h-32 rounded-md border border-slate-700 bg-slate-950 p-2 text-xs font-mono text-slate-200"
+              placeholder="Output A (canonical JSONL)"
+            />
+            <textarea
+              value={p2InputB}
+              onChange={(e) => setP2InputB(e.target.value)}
+              className="h-32 rounded-md border border-slate-700 bg-slate-950 p-2 text-xs font-mono text-slate-200"
+              placeholder="Output B (canonical JSONL)"
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-slate-700 bg-slate-900"
+              disabled={isBusy || !p2InputA.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const h = await QcApi.hashCanonical(p2InputA);
+                  setP2HashA(h);
+                  setStatus(`P2 hash computed · ${h.merkle_root.slice(0, 12)}...`);
+                })
+              }
+            >
+              Hash A
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-slate-700 bg-slate-900"
+              disabled={isBusy || !p2SchemaId.trim() || !p2InputA.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const r = await QcApi.canonicalize({
+                    schema_id: p2SchemaId.trim(),
+                    body: p2InputA,
+                    input_format: 'canonical_jsonl',
+                  });
+                  setP2CanonicalA(r);
+                  setStatus(`P2 canonicalized A · root ${r.merkle_root.slice(0, 12)}...`);
+                })
+              }
+            >
+              Canonicalize A
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-slate-700 bg-slate-900"
+              disabled={isBusy || !p2SchemaId.trim() || !p2InputB.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const r = await QcApi.canonicalize({
+                    schema_id: p2SchemaId.trim(),
+                    body: p2InputB,
+                    input_format: 'canonical_jsonl',
+                  });
+                  setP2CanonicalB(r);
+                  setStatus(`P2 canonicalized B · root ${r.merkle_root.slice(0, 12)}...`);
+                })
+              }
+            >
+              Canonicalize B
+            </Button>
+            <Button
+              size="sm"
+              className="bg-cyan-700 hover:bg-cyan-800"
+              disabled={isBusy || !p2SchemaId.trim() || !p2InputA.trim() || !p2InputB.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const cmp = await QcApi.compare({
+                    schema_id: p2SchemaId.trim(),
+                    mode: p2Mode,
+                    a: p2InputA,
+                    b: p2InputB,
+                    rel_tol: p2RelTol,
+                    max_ulp: p2MaxUlp,
+                  });
+                  setP2Compare(cmp);
+                  setStatus(
+                    cmp.equal
+                      ? `P2 compare passed · mode ${cmp.mode}`
+                      : `P2 compare mismatch · ${cmp.summary.differences} differences`,
+                  );
+                })
+              }
+            >
+              Compare A vs B
+            </Button>
+            <Button
+              size="sm"
+              className="bg-violet-700 hover:bg-violet-800"
+              disabled={isBusy || !p2SchemaId.trim() || !p2InputA.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const baseRows = parseJsonlRows(p2InputA);
+                  const suite = await QcApi.runAdversarialSuite({
+                    schema_id: p2SchemaId.trim(),
+                    mode: p2Mode,
+                    rel_tol: p2RelTol,
+                    max_ulp: p2MaxUlp,
+                    variant_mode: p2VariantMode,
+                    base_rows: baseRows,
+                  });
+                  setP2Adversarial(suite);
+                  const passed = suite.results.filter((row) => row.expectation_passed).length;
+                  setStatus(`P2 adversarial suite: ${passed}/${suite.results.length} expectations passed`);
+                })
+              }
+            >
+              Run adversarial suite
+            </Button>
+            <Button
+              size="sm"
+              className="bg-fuchsia-700 hover:bg-fuchsia-800"
+              disabled={isBusy || !p2SchemaId.trim() || !p2InputA.trim()}
+              onClick={() =>
+                void run(async () => {
+                  const baseRows = parseJsonlRows(p2InputA);
+                  const matrix = await QcApi.runAdversarialMatrix({
+                    schema_id: p2SchemaId.trim(),
+                    rel_tol: p2RelTol,
+                    max_ulp: p2MaxUlp,
+                    variant_mode: p2VariantMode,
+                    base_rows: baseRows,
+                  });
+                  setP2Matrix(matrix);
+                  const allModesPass = matrix.modes.every(
+                    (m) => (m.metrics?.expectation_pass_rate ?? 0) >= 1,
+                  );
+                  setStatus(
+                    allModesPass
+                      ? 'P2 matrix passed for bit_exact and fp_tolerant'
+                      : 'P2 matrix found divergences; inspect mode metrics',
+                  );
+                })
+              }
+            >
+              Run full matrix
+            </Button>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
+            <div className="rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-400">
+              <div className="text-slate-300">Hash A</div>
+              <div className="mt-1 font-mono break-all">{p2HashA?.merkle_root ?? '—'}</div>
+            </div>
+            <div className="rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-400">
+              <div className="text-slate-300">Canonical root A</div>
+              <div className="mt-1 font-mono break-all">{p2CanonicalA?.merkle_root ?? '—'}</div>
+            </div>
+            <div className="rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-400">
+              <div className="text-slate-300">Canonical root B</div>
+              <div className="mt-1 font-mono break-all">{p2CanonicalB?.merkle_root ?? '—'}</div>
+            </div>
+          </div>
+          {p2Compare ? (
+            <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-300">
+              <div>
+                <span className="text-slate-500">Result:</span>{' '}
+                <span className={p2Compare.equal ? 'text-emerald-300' : 'text-amber-300'}>
+                  {p2Compare.equal ? 'equivalent' : 'mismatch'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500">Differences:</span> {p2Compare.summary.differences}
+              </div>
+              <div>
+                <span className="text-slate-500">rel_err_max:</span> {p2Compare.summary.rel_err_max}
+              </div>
+              <div>
+                <span className="text-slate-500">ulp_max:</span> {p2Compare.summary.ulp_max}
+              </div>
+            </div>
+          ) : null}
+          {p2CorpusResults.length ? (
+            <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-300">
+              <div className="mb-1 text-slate-200">Corpus results</div>
+              <div className="max-h-36 overflow-y-auto overscroll-contain space-y-1 pr-1">
+                {p2CorpusResults.map((row) => (
+                  <div key={row.id} className="rounded border border-slate-800/80 px-2 py-1">
+                    <div>
+                      <span className={row.passed ? 'text-emerald-300' : 'text-amber-300'}>
+                        {row.passed ? 'PASS' : 'FAIL'}
+                      </span>{' '}
+                      · {row.title}
+                    </div>
+                    <div className="text-slate-500">
+                      expected={row.expectedEqual ? 'equal' : 'mismatch'} · observed=
+                      {row.observedEqual ? 'equal' : 'mismatch'}
+                    </div>
+                    <div className="text-slate-500">{row.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {p2Adversarial ? (
+            <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-300">
+              <div className="mb-1">
+                <span className="text-slate-500">Adversarial mode:</span> {p2Adversarial.variant_mode} ·{' '}
+                <span className="text-slate-500">base rows:</span> {p2Adversarial.base_record_count}
+              </div>
+              {p2Adversarial.metrics ? (
+                <div className="mb-2 text-slate-400">
+                  pass {(p2Adversarial.metrics.expectation_pass_rate * 100).toFixed(1)}% · false accept{' '}
+                  {p2Adversarial.metrics.false_accept_count} · false reject {p2Adversarial.metrics.false_reject_count}
+                </div>
+              ) : null}
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                {p2Adversarial.results.map((row) => (
+                  <div key={row.variant} className="rounded border border-slate-800/70 px-2 py-1">
+                    <span className="text-slate-200">{row.variant}</span>
+                    <span className="text-slate-500"> · equal </span>
+                    <span className={row.equal ? 'text-emerald-300' : 'text-amber-300'}>
+                      {String(row.equal)}
+                    </span>
+                    <span className="text-slate-500"> · expected </span>
+                    <span className={row.expected_equal ? 'text-emerald-300' : 'text-amber-300'}>
+                      {String(row.expected_equal)}
+                    </span>
+                    <span className="text-slate-500"> · check </span>
+                    <span className={row.expectation_passed ? 'text-emerald-300' : 'text-red-300'}>
+                      {row.expectation_passed ? 'pass' : 'fail'}
+                    </span>
+                    <span className="text-slate-500"> · diffs </span>
+                    {row.summary.differences ?? 0}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {p2Matrix ? (
+            <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-2 text-[11px] text-slate-300">
+              <div className="mb-1 text-slate-200">P2 matrix summary</div>
+              <div className="space-y-1">
+                {p2Matrix.modes.map((modeReport) => (
+                  <div key={modeReport.mode} className="rounded border border-slate-800/70 px-2 py-1">
+                    <span className="text-slate-200">{modeReport.mode}</span>
+                    <span className="text-slate-500"> · pass </span>
+                    {((modeReport.metrics?.expectation_pass_rate ?? 0) * 100).toFixed(1)}%
+                    <span className="text-slate-500"> · FA </span>
+                    {modeReport.metrics?.false_accept_count ?? 0}
+                    <span className="text-slate-500"> · FR </span>
+                    {modeReport.metrics?.false_reject_count ?? 0}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/30 p-3 space-y-2">
+            <div className="text-slate-200 text-xs">P2 Gold Corpus Scoring</div>
+            <textarea
+              value={p2GoldCasesText}
+              onChange={(e) => setP2GoldCasesText(e.target.value)}
+              className="h-40 w-full rounded-md border border-slate-700 bg-slate-950 p-2 text-xs font-mono text-slate-200"
+              placeholder="JSON array of gold corpus cases"
+            />
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+              <label className="text-[11px] text-slate-400">
+                Min pass rate
+                <Input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={p2PassCriteria.min_pass_rate}
+                  onChange={(e) =>
+                    setP2PassCriteria((prev) => ({
+                      ...prev,
+                      min_pass_rate: Math.min(1, Math.max(0, Number(e.target.value) || 0)),
+                    }))
+                  }
+                  className="mt-1 h-8 border-slate-700 bg-slate-950 text-xs"
+                />
+              </label>
+              <label className="text-[11px] text-slate-400">
+                Max false accept rate
+                <Input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={p2PassCriteria.max_false_accept_rate}
+                  onChange={(e) =>
+                    setP2PassCriteria((prev) => ({
+                      ...prev,
+                      max_false_accept_rate: Math.min(1, Math.max(0, Number(e.target.value) || 0)),
+                    }))
+                  }
+                  className="mt-1 h-8 border-slate-700 bg-slate-950 text-xs"
+                />
+              </label>
+              <label className="text-[11px] text-slate-400">
+                Max false reject rate
+                <Input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={p2PassCriteria.max_false_reject_rate}
+                  onChange={(e) =>
+                    setP2PassCriteria((prev) => ({
+                      ...prev,
+                      max_false_reject_rate: Math.min(1, Math.max(0, Number(e.target.value) || 0)),
+                    }))
+                  }
+                  className="mt-1 h-8 border-slate-700 bg-slate-950 text-xs"
+                />
+              </label>
+            </div>
+            <Input
+              value={p2GoldLabel}
+              onChange={(e) => setP2GoldLabel(e.target.value)}
+              className="h-8 border-slate-700 bg-slate-950 text-xs"
+              placeholder="Report label"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                className="bg-blue-700 hover:bg-blue-800"
+                disabled={isBusy || !p2GoldCasesText.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    const parsed = parseGoldCasesInput();
+                    const report = await QcApi.evaluateGoldCorpus({ cases: parsed });
+                    setP2GoldReport(report);
+                    setStatus(
+                      `Gold corpus scored · ${(report.pass_rate * 100).toFixed(1)}% pass · FA ${report.false_accept_count} · FR ${report.false_reject_count}`,
+                    );
+                  })
+                }
+              >
+                Evaluate gold corpus
+              </Button>
+              <Button
+                size="sm"
+                className="bg-emerald-700 hover:bg-emerald-800"
+                disabled={isBusy || !p2GoldReport || !p2GoldLabel.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    if (!p2GoldReport) return;
+                    const saved = await QcApi.saveGoldCorpusReport({
+                      label: p2GoldLabel.trim(),
+                      report: p2GoldReport,
+                      criteria: p2PassCriteria,
+                    });
+                    await loadGoldCorpusReports(10);
+                    setStatus(
+                      `Saved gold report ${saved.report_id.slice(0, 8)}... · criteria ${saved.pass_criteria_met ? 'PASS' : 'FAIL'}`,
+                    );
+                  })
+                }
+              >
+                Save report
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700 bg-slate-900"
+                disabled={isBusy}
+                onClick={() =>
+                  void run(async () => {
+                    const count = await loadGoldCorpusReports(10);
+                    setStatus(`Loaded ${count} saved gold reports`);
+                  })
+                }
+              >
+                Refresh saved reports
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700 bg-slate-900"
+                disabled={!p2GoldReport}
+                onClick={() =>
+                  downloadJson(
+                    `p2_gold_report_${Date.now()}.json`,
+                    p2GoldReport,
+                  )
+                }
+              >
+                Download report JSON
+              </Button>
+            </div>
+            {p2GoldReport ? (
+              <div className="text-[11px] text-slate-300 space-y-1">
+                <div>
+                  <span className="text-slate-500">Pass rate:</span>{' '}
+                  {(p2GoldReport.pass_rate * 100).toFixed(1)}% ({p2GoldReport.pass_cases}/
+                  {p2GoldReport.total_cases})
+                </div>
+                <div>
+                  <span className="text-slate-500">False accept:</span> {p2GoldReport.false_accept_count} (
+                  {(p2GoldReport.false_accept_rate * 100).toFixed(1)}%)
+                </div>
+                <div>
+                  <span className="text-slate-500">False reject:</span> {p2GoldReport.false_reject_count} (
+                  {(p2GoldReport.false_reject_rate * 100).toFixed(1)}%)
+                </div>
+                <div>
+                  <span className="text-slate-500">Pass criteria:</span>{' '}
+                  <span
+                    className={
+                      p2GoldCriteriaPass == null
+                        ? 'text-slate-300'
+                        : p2GoldCriteriaPass
+                          ? 'text-emerald-300'
+                          : 'text-amber-300'
+                    }
+                  >
+                    {p2GoldCriteriaPass == null ? 'n/a' : p2GoldCriteriaPass ? 'PASS' : 'FAIL'}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            {p2GoldSavedReports.length ? (
+              <div className="rounded border border-slate-800/80 bg-slate-950/20 p-2 text-[11px] text-slate-300">
+                <div className="mb-1 text-slate-200">Saved benchmark reports</div>
+                <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                  {p2GoldSavedReports.map((row) => (
+                    <div key={row.report_id} className="rounded border border-slate-800/70 px-2 py-1">
+                      <div>
+                        <span className={row.pass_criteria_met ? 'text-emerald-300' : 'text-amber-300'}>
+                          {row.pass_criteria_met ? 'PASS' : 'FAIL'}
+                        </span>{' '}
+                        · {row.label}
+                      </div>
+                      <div className="text-slate-500">
+                        pass {(row.report.pass_rate * 100).toFixed(1)}% · FA{' '}
+                        {(row.report.false_accept_rate * 100).toFixed(1)}% · FR{' '}
+                        {(row.report.false_reject_rate * 100).toFixed(1)}%
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         </Card>
 
@@ -926,8 +2407,7 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             {error ? <div className="mt-3 text-sm text-red-200">{error}</div> : null}
           </Card>
         )}
-        {lastDemoRun ? <DemoExecutionReceiptCard run={lastDemoRun} /> : null}
-        {lastDelivery ? <DeliveryExecutionReceiptCard d={lastDelivery} /> : null}
+        {lastDemoRun ? <ExecutionReceiptCard run={lastDemoRun} /> : null}
       </div>
     </div>
   );

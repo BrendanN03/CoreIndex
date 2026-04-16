@@ -10,6 +10,8 @@ from app.api.v1.endpoints import (
     platform,
     provider,
     qc,
+    sessions,
+    settlement,
     vouchers,
 )
 
@@ -24,5 +26,7 @@ router.include_router(options.router, tags=["options"])
 router.include_router(jobs.router, tags=["jobs"])
 router.include_router(provider.router, tags=["provider"])
 router.include_router(qc.router, tags=["qc"])
+router.include_router(sessions.router, tags=["sessions"])
+router.include_router(settlement.router, tags=["settlement"])
 router.include_router(vouchers.router, tags=["vouchers"])
 router.include_router(platform.router, tags=["platform"])

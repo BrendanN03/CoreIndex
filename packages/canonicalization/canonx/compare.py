@@ -7,6 +7,14 @@ from typing import Any, BinaryIO, Dict, Literal, Tuple
 from .ulp import ulp_distance
 
 Mode = Literal["bit_exact", "fp_tolerant"]
+_ALIGNMENT_KEY_CANDIDATES = (
+    "id",
+    "item_id",
+    "package_id",
+    "rank",
+    "index",
+    "i",
+)
 
 
 def rel_err(a: float, b: float) -> float:
@@ -15,6 +23,18 @@ def rel_err(a: float, b: float) -> float:
 
 def _is_special(v: Any) -> bool:
     return isinstance(v, str) and v in ("NaN", "Inf", "-Inf")
+
+
+def _is_numeric_string(v: Any) -> bool:
+    if not isinstance(v, str):
+        return False
+    if _is_special(v):
+        return True
+    try:
+        float(v)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _coerce_json_number(x: Any) -> float:
@@ -38,6 +58,103 @@ def _same_numeric(a: Any, b: Any, rel_tol: float, max_ulp: int) -> Tuple[bool, f
     return ok, re, ulp
 
 
+def _is_numeric_like(v: Any) -> bool:
+    return isinstance(v, (int, float)) or _is_special(v) or _is_numeric_string(v)
+
+
+def _is_hashable_scalar(v: Any) -> bool:
+    return isinstance(v, (str, int, float, bool)) or v is None
+
+
+def _record_sort_key(record: Dict[str, Any]) -> str:
+    # Deterministic serializer variability guard (field ordering, whitespace).
+    return json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _infer_alignment_key(a_records: list[Dict[str, Any]], b_records: list[Dict[str, Any]]) -> str | None:
+    if not a_records or not b_records:
+        return None
+    shared = set(a_records[0].keys()) & set(b_records[0].keys())
+    for key in _ALIGNMENT_KEY_CANDIDATES:
+        if key not in shared:
+            continue
+        if all(key in rec for rec in a_records) and all(key in rec for rec in b_records):
+            a_vals = [rec[key] for rec in a_records]
+            b_vals = [rec[key] for rec in b_records]
+            if all(_is_hashable_scalar(v) for v in a_vals + b_vals) and len(set(a_vals)) == len(
+                a_vals
+            ) and len(set(b_vals)) == len(b_vals):
+                return key
+    return None
+
+
+def _align_records(
+    a_records: list[Dict[str, Any]], b_records: list[Dict[str, Any]]
+) -> list[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    key = _infer_alignment_key(a_records, b_records)
+    if key is not None:
+        a_map = {rec[key]: rec for rec in a_records}
+        b_map = {rec[key]: rec for rec in b_records}
+        if set(a_map.keys()) == set(b_map.keys()):
+            return [(a_map[k], b_map[k]) for k in sorted(a_map.keys(), key=lambda v: str(v))]
+    # Fallback: deterministic ordering by canonical JSON payload.
+    a_sorted = sorted(a_records, key=_record_sort_key)
+    b_sorted = sorted(b_records, key=_record_sort_key)
+    return list(zip(a_sorted, b_sorted))
+
+
+def _compare_value(
+    a: Any,
+    b: Any,
+    *,
+    rel_tol: float,
+    max_ulp: int,
+) -> Tuple[int, float, int]:
+    """
+    Compare possibly nested canonical JSON values.
+
+    Returns:
+      (diff_count, rel_err_max, ulp_max)
+    """
+    # Fast path.
+    if a == b:
+        return 0, 0.0, 0
+
+    # Numeric tolerance path.
+    if _is_numeric_like(a) or _is_numeric_like(b):
+        ok, re, ulp = _same_numeric(a, b, rel_tol, max_ulp)
+        return (0, re, ulp) if ok else (1, re, ulp)
+
+    # Dict recursion.
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return 1, 0.0, 0
+        diffs = 0
+        rel_err_max, ulp_max = 0.0, 0
+        for key in a.keys():
+            d, re, ulp = _compare_value(a[key], b[key], rel_tol=rel_tol, max_ulp=max_ulp)
+            diffs += d
+            rel_err_max = max(rel_err_max, re)
+            ulp_max = max(ulp_max, ulp)
+        return diffs, rel_err_max, ulp_max
+
+    # List recursion.
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return 1, 0.0, 0
+        diffs = 0
+        rel_err_max, ulp_max = 0.0, 0
+        for va, vb in zip(a, b):
+            d, re, ulp = _compare_value(va, vb, rel_tol=rel_tol, max_ulp=max_ulp)
+            diffs += d
+            rel_err_max = max(rel_err_max, re)
+            ulp_max = max(ulp_max, ulp)
+        return diffs, rel_err_max, ulp_max
+
+    # Non-numeric scalar mismatch.
+    return 1, 0.0, 0
+
+
 def compare_canonical_streams(
     a_stream: BinaryIO,
     b_stream: BinaryIO,
@@ -47,8 +164,9 @@ def compare_canonical_streams(
     max_ulp: int = 2,
 ) -> Dict[str, Any]:
     """
-    Assumes both streams are already canonical JSONL with identical schemas
-    and sorted by the schema's primary key(s).
+    Compares canonical JSONL streams and is resilient to row-order drift by:
+    - aligning on common unique keys (id/package_id/rank/...), then
+    - falling back to canonical JSON lexical ordering.
     """
     diffs = 0
     rel_err_max, ulp_max = 0.0, 0
@@ -57,53 +175,21 @@ def compare_canonical_streams(
     def parse_line(line: bytes) -> Dict[str, Any]:
         # JSONL one object per line, UTF-8
         return json.loads(line)
+    a_records = [parse_line(line) for line in a_stream.readlines() if line.strip()]
+    b_records = [parse_line(line) for line in b_stream.readlines() if line.strip()]
+    recs = min(len(a_records), len(b_records))
+    if len(a_records) != len(b_records):
+        diffs += 1
 
-    la = a_stream.readline()
-    lb = b_stream.readline()
-    while la or lb:
-        if not la or not lb:
-            # different number of records -> mismatch
-            diffs += 1
-            break
-
-        ra = parse_line(la)
-        rb = parse_line(lb)
-        recs += 1
-
+    for ra, rb in _align_records(a_records, b_records):
         if mode == "bit_exact":
-            # byte-equality already ensured by identical canonicalization + hashing
-            # but we still sanity-check field-by-field for diagnostics
             if ra != rb:
                 diffs += 1
         else:
-            # fp_tolerant: compare field-by-field
-            if ra.keys() != rb.keys():
-                diffs += 1
-            else:
-                for k in ra.keys():
-                    va, vb = ra[k], rb[k]
-                    # Quick path: identical JSON tokens
-                    if va == vb:
-                        continue
-                    # Numeric?
-                    if (
-                        isinstance(va, (int, float))
-                        or isinstance(vb, (int, float))
-                        or _is_special(va)
-                        or _is_special(vb)
-                    ):
-                        ok, re, ulp = _same_numeric(va, vb, rel_tol, max_ulp)
-                        rel_err_max = max(rel_err_max, re)
-                        ulp_max = max(ulp_max, ulp)
-                        if not ok:
-                            diffs += 1
-                    else:
-                        # strings/booleans/null must match exactly after canonicalization
-                        if va != vb:
-                            diffs += 1
-
-        la = a_stream.readline()
-        lb = b_stream.readline()
+            d, re, ulp = _compare_value(ra, rb, rel_tol=rel_tol, max_ulp=max_ulp)
+            diffs += d
+            rel_err_max = max(rel_err_max, re)
+            ulp_max = max(ulp_max, ulp)
 
     equal = diffs == 0
     return {

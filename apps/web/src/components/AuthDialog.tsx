@@ -23,6 +23,13 @@ type Props = {
   onLoggedIn: (payload: { accessToken: string; user: UserPublicDto }) => void;
 };
 
+/** Relaxed email check (server still validates with EmailStr). Avoids browser-only type=email quirks in dialogs. */
+function looksLikeEmail(value: string): boolean {
+  const v = value.trim();
+  if (!v || v.length > 254) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
 export function AuthDialog({ onLoggedIn }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -36,18 +43,31 @@ export function AuthDialog({ onLoggedIn }: Props) {
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = useMemo(() => {
-    const e = email.trim();
-    if (!e || !password) return false;
-    if (mode === 'register' && password.length < 8) return false;
-    return true;
-  }, [email, password, mode]);
+  const registerPasswordHint = useMemo(() => {
+    if (mode !== 'register') return null;
+    if (!password) return null;
+    if (password.length >= 8) return null;
+    return `${8 - password.length} more character(s) needed (minimum 8).`;
+  }, [mode, password]);
 
   async function handleLogin() {
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setError('Please enter your email address.');
+      return;
+    }
+    if (!looksLikeEmail(trimmed)) {
+      setError('Please enter a valid email address (example: you@company.com).');
+      return;
+    }
+    if (!password) {
+      setError('Please enter your password.');
+      return;
+    }
     setIsBusy(true);
     setError(null);
     try {
-      const res = await AuthApi.login({ email: email.trim(), password });
+      const res = await AuthApi.login({ email: trimmed, password });
       onLoggedIn({ accessToken: res.access_token, user: res.user });
       setOpen(false);
       setPassword('');
@@ -59,29 +79,56 @@ export function AuthDialog({ onLoggedIn }: Props) {
   }
 
   async function handleRegister() {
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setError('Please enter your email address.');
+      return;
+    }
+    if (!looksLikeEmail(trimmed)) {
+      setError('Please enter a valid email address (example: you@company.com).');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters. Add a few more characters and try again.');
+      return;
+    }
     setIsBusy(true);
     setError(null);
     try {
       await AuthApi.register({
-        email: email.trim(),
+        email: trimmed,
         password,
         display_name: displayName.trim() ? displayName.trim() : undefined,
         role,
       });
       // Convenience: auto-login after register.
-      const res = await AuthApi.login({ email: email.trim(), password });
+      const res = await AuthApi.login({ email: trimmed, password });
       onLoggedIn({ accessToken: res.access_token, user: res.user });
       setOpen(false);
       setPassword('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.toLowerCase().includes('already registered')) {
+        setMode('login');
+        setError('This email is already registered. Please login with your existing password.');
+      } else {
+        setError(message);
+      }
     } finally {
       setIsBusy(false);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) {
+          setError(null);
+        }
+      }}
+    >
       <DialogTrigger asChild>
         <Button variant="outline" className="bg-slate-800 border-slate-700">
           Login
@@ -91,13 +138,16 @@ export function AuthDialog({ onLoggedIn }: Props) {
         <DialogHeader>
           <DialogTitle>Authentication</DialogTitle>
           <DialogDescription>
-            Demo auth backed by the FastAPI in-memory auth endpoints.
+            Email/password authentication backed by FastAPI auth endpoints.
           </DialogDescription>
         </DialogHeader>
 
         <Tabs
           value={mode}
-          onValueChange={(v) => setMode(v as 'login' | 'register')}
+          onValueChange={(v) => {
+            setMode(v as 'login' | 'register');
+            setError(null);
+          }}
           className="w-full"
         >
           <TabsList className="bg-slate-900 border border-slate-800">
@@ -108,15 +158,17 @@ export function AuthDialog({ onLoggedIn }: Props) {
           <TabsContent value="login" className="mt-4 space-y-3">
             <form
               className="space-y-3"
+              noValidate
               onSubmit={(e) => {
                 e.preventDefault();
-                if (canSubmit && !isBusy) void handleLogin();
+                if (!isBusy) void handleLogin();
               }}
             >
             <div className="space-y-2">
               <div className="text-xs text-slate-400">Email</div>
               <Input
-                type="email"
+                type="text"
+                inputMode="email"
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -143,9 +195,10 @@ export function AuthDialog({ onLoggedIn }: Props) {
             ) : null}
 
             <Button
-              type="submit"
+              type="button"
               className="w-full bg-blue-600 hover:bg-blue-700"
-              disabled={isBusy || !canSubmit}
+              disabled={isBusy}
+              onClick={() => void handleLogin()}
             >
               {isBusy ? 'Working…' : 'Login'}
             </Button>
@@ -155,15 +208,17 @@ export function AuthDialog({ onLoggedIn }: Props) {
           <TabsContent value="register" className="mt-4 space-y-3">
             <form
               className="space-y-3"
+              noValidate
               onSubmit={(e) => {
                 e.preventDefault();
-                if (canSubmit && !isBusy) void handleRegister();
+                if (!isBusy) void handleRegister();
               }}
             >
             <div className="space-y-2">
               <div className="text-xs text-slate-400">Email</div>
               <Input
-                type="email"
+                type="text"
+                inputMode="email"
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -188,7 +243,7 @@ export function AuthDialog({ onLoggedIn }: Props) {
                 <SelectTrigger className="bg-slate-900 border-slate-800">
                   <SelectValue placeholder="Select role" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent position="popper" className="z-[200]">
                   <SelectItem value="buyer">Buyer</SelectItem>
                   <SelectItem value="seller">Seller (Provider)</SelectItem>
                 </SelectContent>
@@ -199,11 +254,15 @@ export function AuthDialog({ onLoggedIn }: Props) {
               <div className="text-xs text-slate-400">Password (min 8 chars)</div>
               <Input
                 type="password"
+                autoComplete="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
                 className="bg-slate-900 border-slate-800"
               />
+              {registerPasswordHint ? (
+                <div className="text-xs text-amber-200/90">{registerPasswordHint}</div>
+              ) : null}
             </div>
 
             {error ? (
@@ -213,9 +272,10 @@ export function AuthDialog({ onLoggedIn }: Props) {
             ) : null}
 
             <Button
-              type="submit"
+              type="button"
               className="w-full bg-blue-600 hover:bg-blue-700"
-              disabled={isBusy || !canSubmit}
+              disabled={isBusy}
+              onClick={() => void handleRegister()}
             >
               {isBusy ? 'Working…' : 'Create account'}
             </Button>

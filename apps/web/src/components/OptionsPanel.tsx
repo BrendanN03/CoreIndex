@@ -201,7 +201,7 @@ export function OptionsPanel({ selectedGPU }: Props) {
           <h3 className="text-slate-100">Options Pricing and Risk</h3>
           <p className="mt-2 text-sm text-slate-400">
             Quote Black-76 premiums and Greeks, then list product-key option contracts for
-            simulated execution.
+            exchange execution.
           </p>
         </div>
         <Badge variant="outline" className="border-indigo-800 text-indigo-300">
@@ -513,7 +513,7 @@ export function OptionsPanel({ selectedGPU }: Props) {
               ) : null}
               {liquidationResult ? (
                 <div className="pt-2 text-amber-300">
-                  Liquidation simulation: cancelled {liquidationResult.cancelled_futures_orders} futures
+                  Liquidation review: cancelled {liquidationResult.cancelled_futures_orders} futures
                   and {liquidationResult.cancelled_option_orders} option orders.
                 </div>
               ) : null}
@@ -541,11 +541,11 @@ export function OptionsPanel({ selectedGPU }: Props) {
                     void run(async () => {
                       const result = await OptionsApi.liquidate('stress_test_liquidation');
                       setLiquidationResult(result);
-                      setStatus('Executed liquidation simulation');
+                      setStatus('Executed liquidation review');
                     })
                   }
                 >
-                  Simulate Liquidation
+                  Run Liquidation Review
                 </Button>
               </div>
             </div>

@@ -42,8 +42,30 @@ export function MyJobs({ refreshTrigger = 0 }: Props) {
   async function fetchJobs() {
     setLoading(true);
     setError(null);
+    const delays = [0, 80, 200, 450];
+    let list: JobResponseDto[] | null = null;
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i] > 0) {
+        await new Promise((r) => setTimeout(r, delays[i]));
+      }
+      try {
+        list = await JobApi.listJobs(JOB_LIST_LIMIT);
+        break;
+      } catch (e) {
+        if (i === delays.length - 1) {
+          setError(e instanceof Error ? e.message : String(e));
+          setJobs([]);
+          setFeasibilityByJob({});
+          setLoading(false);
+          return;
+        }
+      }
+    }
+    if (!list) {
+      setLoading(false);
+      return;
+    }
     try {
-      const list = await JobApi.listJobs(JOB_LIST_LIMIT);
       setJobs(list);
       const entries = await mapPool(list, FEASIBILITY_CONCURRENCY, async (job) => {
         const feas = await JobApi.getFeasibility(job.job_id);
@@ -52,7 +74,6 @@ export function MyJobs({ refreshTrigger = 0 }: Props) {
       setFeasibilityByJob(Object.fromEntries(entries));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setJobs([]);
       setFeasibilityByJob({});
     } finally {
       setLoading(false);

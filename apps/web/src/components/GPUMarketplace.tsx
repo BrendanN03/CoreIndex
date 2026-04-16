@@ -32,15 +32,25 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
   async function refreshListings() {
     setIsLoading(true);
     setError(null);
-    try {
-      const rows = await ProviderApi.getListings();
-      setListings(rows);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setListings([]);
-    } finally {
-      setIsLoading(false);
+    const delays = [0, 80, 200, 450];
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt] > 0) {
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+      try {
+        const rows = await ProviderApi.getListings();
+        setListings(rows);
+        setError(null);
+        setIsLoading(false);
+        return;
+      } catch (err) {
+        if (attempt === delays.length - 1) {
+          setError(err instanceof Error ? err.message : String(err));
+          setListings([]);
+        }
+      }
     }
+    setIsLoading(false);
   }
 
   useEffect(() => {

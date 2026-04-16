@@ -122,6 +122,7 @@ process.on('SIGTERM', () => {
 async function main() {
   const apiPort = parsePort('COREINDEX_DEV_API_PORT', 8010)
   const webPort = parsePort('COREINDEX_DEV_WEB_PORT', 5173)
+  const factorStubPort = parsePort('COREINDEX_DEV_FACTOR_STUB_PORT', 8000)
   await assertPortFree(apiPort, 'API')
   await assertPortFree(webPort, 'Web')
 
@@ -134,6 +135,41 @@ async function main() {
   console.log(`[dev-stack] Proxy /coreindex-api → ${proxyTarget}`)
   if (fs.existsSync(path.join(apiDir, '.env'))) {
     console.log('[dev-stack] Loaded apps/api/.env into API process (shell vars still override).')
+  }
+  console.log('')
+
+  if (process.env.COREINDEX_DEV_FACTOR_STUB === '1') {
+    if (await canBindPort(factorStubPort)) {
+      const stub = spawn(
+        python,
+        [
+          '-m',
+          'uvicorn',
+          'dev_remote_factor_server:app',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(factorStubPort),
+        ],
+        {
+          cwd: apiDir,
+          stdio: 'inherit',
+          env: { ...apiEnvFile, ...process.env, PYTHONUNBUFFERED: '1' },
+        },
+      )
+      children.push(stub)
+      stub.on('error', (err) => {
+        console.error('[dev-stack] Factor stub failed to start:', err.message)
+      })
+      console.log(
+        `[dev-stack] Factor stub → http://127.0.0.1:${factorStubPort} (dev_remote_factor_server; matches FACTORING_REMOTE_HTTP_URL on :8000)`,
+      )
+      await new Promise((r) => setTimeout(r, 500))
+    } else {
+      console.warn(
+        `[dev-stack] COREINDEX_DEV_FACTOR_STUB=1 but port ${factorStubPort} is in use — start dev_remote_factor_server manually or free the port.`,
+      )
+    }
   }
   console.log('')
 

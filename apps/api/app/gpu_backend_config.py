@@ -28,14 +28,22 @@ def factoring_post_url() -> str:
     return f"{factoring_base_url()}{factoring_factor_path()}"
 
 
-def factoring_timeouts() -> tuple[float, float]:
-    """(connect seconds, read seconds) for requests.post to /factor."""
+def factoring_timeouts() -> tuple[float, float | None]:
+    """(connect seconds, read seconds) for requests.post to /factor.
+
+    Read timeout ``None`` means no limit (required for long CADO-NFS runs). Set
+    ``FACTORING_HTTP_READ_TIMEOUT_SECONDS=0`` or ``none`` for that behavior.
+    A positive number caps idle time between recv chunks (can kill very slow streams).
+    """
     connect = float(os.getenv("FACTORING_HTTP_CONNECT_TIMEOUT_SECONDS", "15"))
-    read_raw = os.getenv("FACTORING_HTTP_READ_TIMEOUT_SECONDS") or os.getenv(
-        "FACTORING_HTTP_TIMEOUT_SECONDS", "86400"
-    )
-    read = float(read_raw)
-    return (connect, read)
+    read_raw = (
+        os.getenv("FACTORING_HTTP_READ_TIMEOUT_SECONDS")
+        or os.getenv("FACTORING_HTTP_TIMEOUT_SECONDS")
+        or ""
+    ).strip().lower()
+    if read_raw in ("", "0", "none", "inf", "infinity"):
+        return (connect, None)
+    return (connect, float(read_raw))
 
 
 def factoring_ssh_host_label() -> str:
@@ -48,11 +56,17 @@ def setup_instructions_hint() -> str:
         return custom
     host = factoring_ssh_host_label()
     return (
-        "On the GPU server (e.g. /home/coreindex/cado_improved): "
-        "uvicorn remote_factor_server:app --host 0.0.0.0 --port 8000. "
-        "From your laptop, forward port 8000 then point CoreIndex at localhost, e.g. "
-        f"ssh -N -L 8000:127.0.0.1:8000 you@{host} "
-        "and set FACTORING_REMOTE_HTTP_URL=http://127.0.0.1:8000 in apps/api/.env"
+        "Local dev (no GPU): from apps/api run "
+        "`.venv/bin/python -m uvicorn dev_remote_factor_server:app --host 127.0.0.1 --port 8000` "
+        "with FACTORING_REMOTE_HTTP_URL=http://127.0.0.1:8000 in apps/api/.env, "
+        "or start the full stack with COREINDEX_DEV_FACTOR_STUB=1. "
+        "Production: on the GPU server run "
+        "`uvicorn remote_factor_server:app --host 0.0.0.0 --port 8000`, then from your laptop "
+        f"`ssh -N -L 8000:127.0.0.1:8000 you@{host}` "
+        "and keep FACTORING_REMOTE_HTTP_URL=http://127.0.0.1:8000. "
+        "Leave that ssh -N window open; a normal interactive ssh session does not forward ports. "
+        "If HTTP_PROXY is set, CoreIndex disables proxying for the factor URL; you can also set "
+        "NO_PROXY=127.0.0.1,localhost."
     )
 
 

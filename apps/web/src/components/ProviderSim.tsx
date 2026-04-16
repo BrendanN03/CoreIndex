@@ -261,7 +261,7 @@ export function ProviderSim() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
           <Card className="bg-slate-950/40 border-slate-800 p-4">
-            <div className="text-slate-200 mb-3">1) Nominate capacity</div>
+            <div className="text-slate-200 mb-3">1) Publish capacity</div>
             <div className="text-xs text-slate-400 mb-2">GPU model</div>
             <Input
               value={gpuModel}
@@ -302,12 +302,12 @@ export function ProviderSim() {
                 )
               }
             >
-              POST /nominations
+              Publish Capacity
             </Button>
           </Card>
 
           <Card className="bg-slate-950/40 border-slate-800 p-4">
-            <div className="text-slate-200 mb-3">2) Create a lot</div>
+            <div className="text-slate-200 mb-3">2) Allocate a lot</div>
             <div className="text-xs text-slate-400 mb-2">Job ID (optional)</div>
             <Input
               value={jobId}
@@ -330,7 +330,7 @@ export function ProviderSim() {
                 })
               }
             >
-              POST /lots
+              Allocate Lot
             </Button>
             <div className="text-xs text-slate-400 mt-3">
               Current lot_id:{' '}
@@ -339,7 +339,7 @@ export function ProviderSim() {
           </Card>
 
           <Card className="bg-slate-950/40 border-slate-800 p-4">
-            <div className="text-slate-200 mb-3">3) Advance lot status</div>
+            <div className="text-slate-200 mb-3">3) Advance lot lifecycle</div>
             <Button
               className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700"
               variant="outline"
@@ -355,7 +355,7 @@ export function ProviderSim() {
                 )
               }
             >
-              POST /lots/{'{lot_id}'}/prepare_ready
+              Mark Lot Ready
             </Button>
 
             <Button
@@ -368,12 +368,12 @@ export function ProviderSim() {
                     item_count: 1000,
                     wall_time_seconds: 120,
                     raw_gpu_time_seconds: 110,
-                    logs_uri: 'https://example.com/logs/demo',
+                    logs_uri: `https://example.com/logs/${encodeURIComponent(lotId)}`,
                   }),
                 )
               }
             >
-              POST /lots/{'{lot_id}'}/result
+              Submit Lot Result
             </Button>
 
             {!lotId && (

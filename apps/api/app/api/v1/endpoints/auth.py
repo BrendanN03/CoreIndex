@@ -16,6 +16,8 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+import os
 import secrets
 import threading
 import uuid
@@ -96,6 +98,8 @@ class AuthStorage:
         self._sessions_by_token: Dict[str, _SessionRow] = {}
         self._token_ttl = timedelta(hours=token_ttl_hours)
         self._lock = threading.RLock()
+        self._persist_timer: threading.Timer | None = None
+        self._persist_sched_lock = threading.Lock()
         self._load_state()
 
     def _load_state(self) -> None:
@@ -131,30 +135,60 @@ class AuthStorage:
             self._sessions_by_token[row.token] = row
 
     def _persist_state(self) -> None:
+        """Flush auth JSON to disk without holding _lock across disk I/O (avoids wedging /auth/login)."""
         self._state_file.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            payload = {
-                "users": [
-                    {
-                        "user_id": row.user_id,
-                        "email": row.email,
-                        "display_name": row.display_name,
-                        "role": row.role,
-                        "password_hash": row.password_hash,
-                        "created_at": row.created_at,
-                    }
-                    for row in list(self._users_by_id.values())
-                ],
-                "sessions": [
-                    {
-                        "token": row.token,
-                        "user_id": row.user_id,
-                        "expires_at": row.expires_at.isoformat(),
-                    }
-                    for row in list(self._sessions_by_token.values())
-                ],
-            }
-            self._state_file.write_text(json.dumps(payload, indent=2))
+            user_rows = list(self._users_by_id.values())
+            session_rows = list(self._sessions_by_token.values())
+        payload = {
+            "users": [
+                {
+                    "user_id": row.user_id,
+                    "email": row.email,
+                    "display_name": row.display_name,
+                    "role": row.role,
+                    "password_hash": row.password_hash,
+                    "created_at": row.created_at,
+                }
+                for row in user_rows
+            ],
+            "sessions": [
+                {
+                    "token": row.token,
+                    "user_id": row.user_id,
+                    "expires_at": row.expires_at.isoformat(),
+                }
+                for row in session_rows
+            ],
+        }
+        self._state_file.write_text(json.dumps(payload, indent=2))
+
+    def _schedule_persist(self) -> None:
+        """Coalesce disk writes so login/register return immediately."""
+        with self._persist_sched_lock:
+            if self._persist_timer is not None:
+                self._persist_timer.cancel()
+                self._persist_timer = None
+            timer = threading.Timer(0.2, self._timer_flush_persist)
+            timer.daemon = True
+            self._persist_timer = timer
+            timer.start()
+
+    def _timer_flush_persist(self) -> None:
+        with self._persist_sched_lock:
+            self._persist_timer = None
+        try:
+            self._persist_state()
+        except Exception:
+            logging.getLogger("uvicorn.error").exception("auth persist failed")
+
+    def flush_persist_blocking(self) -> None:
+        """Process shutdown: cancel debounce timer and write once."""
+        with self._persist_sched_lock:
+            if self._persist_timer is not None:
+                self._persist_timer.cancel()
+                self._persist_timer = None
+        self._persist_state()
 
     # ---- users ----
     def create_user(
@@ -186,14 +220,16 @@ class AuthStorage:
             )
             self._users_by_email[email_key] = row
             self._users_by_id[user_id] = row
-        self._persist_state()
+        self._schedule_persist()
         return row
 
     def get_user_by_email(self, email: str) -> Optional[_UserRow]:
-        return self._users_by_email.get(email.strip().lower())
+        with self._lock:
+            return self._users_by_email.get(email.strip().lower())
 
     def get_user_by_id(self, user_id: str) -> Optional[_UserRow]:
-        return self._users_by_id.get(user_id)
+        with self._lock:
+            return self._users_by_id.get(user_id)
 
     # ---- sessions ----
     def create_session(self, user_id: str) -> _SessionRow:
@@ -202,7 +238,7 @@ class AuthStorage:
             expires_at = datetime.now(timezone.utc) + self._token_ttl
             row = _SessionRow(token=token, user_id=user_id, expires_at=expires_at)
             self._sessions_by_token[token] = row
-        self._persist_state()
+        self._schedule_persist()
         return row
 
     def get_session(self, token: str) -> Optional[_SessionRow]:
@@ -215,7 +251,7 @@ class AuthStorage:
                 self._sessions_by_token.pop(token, None)
                 expired = True
         if expired:
-            self._persist_state()
+            self._schedule_persist()
             return None
         return row
 
@@ -242,9 +278,12 @@ def _b64d(txt: str) -> bytes:
     return base64.urlsafe_b64decode((txt + pad).encode("ascii"))
 
 
-def _hash_password(password: str, *, iterations: int = 210_000) -> str:
+def _hash_password(password: str, *, iterations: int | None = None) -> str:
     if not isinstance(password, str):
         raise TypeError("password must be str")
+    if iterations is None:
+        iterations = int(os.getenv("AUTH_PBKDF2_ITERATIONS", "120000"))
+        iterations = max(10_000, min(iterations, 600_000))
     salt = secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac(
         "sha256",

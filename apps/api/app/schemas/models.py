@@ -124,6 +124,100 @@ class SettlementState(str, Enum):
     FAILED = "failed"
 
 
+class CollectiveSessionCreateRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=96)
+    job_id: str = Field(..., min_length=1, max_length=96)
+    region: Region
+    iso_hour: int = Field(..., ge=0, le=23)
+    sla: SLA
+    tier: Tier
+    world_size: int = Field(..., ge=1, le=512)
+    membership: List[str] = Field(..., min_length=1)
+    net_profile: str = Field("collective_v1", min_length=1, max_length=64)
+
+
+class CollectiveSessionResponse(BaseModel):
+    session_id: str
+    job_id: str
+    product_key: ProductKey
+    world_size: int
+    membership: List[str]
+    net_profile: str
+    state: SessionState
+    ready_members: List[str] = Field(default_factory=list)
+    ready_count: int = Field(0, ge=0)
+    created_at: str
+    finalized_at: Optional[str] = None
+    activated_at: Optional[str] = None
+    expired_at: Optional[str] = None
+
+
+class SessionReadyRequest(BaseModel):
+    member_id: str = Field(..., min_length=1, max_length=128)
+
+
+class SessionFinalizeResponse(BaseModel):
+    session_id: str
+    state: SessionState
+    ready_count: int = Field(..., ge=0)
+    world_size: int = Field(..., ge=1)
+
+
+class JobReceiptRow(BaseModel):
+    event_id: str
+    created_at: str
+    position_id: str
+    provider_count: int = Field(0, ge=0)
+    delivered_ngh: float = Field(0.0, ge=0)
+    settlement_status: Optional[str] = None
+    verification_hash: Optional[str] = None
+    blockchain_anchor: Optional[Dict[str, Any]] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class JobReceiptsResponse(BaseModel):
+    job_id: str
+    receipt_count: int = Field(0, ge=0)
+    receipts: List[JobReceiptRow] = Field(default_factory=list)
+
+
+class SettlementAnchorRequest(BaseModel):
+    job_id: str = Field(..., min_length=1)
+    receipt_root: str = Field(..., min_length=8)
+    qc_root: str = Field(..., min_length=8)
+    note: Optional[str] = Field(None, max_length=280)
+
+
+class SettlementPayRequest(BaseModel):
+    job_id: str = Field(..., min_length=1)
+    settlement_id: str = Field(..., min_length=1)
+    accepted_ngh: float = Field(..., ge=0)
+    rejected_ngh: float = Field(0.0, ge=0)
+
+
+class SettlementRunResponse(BaseModel):
+    settlement_id: str
+    job_id: str
+    state: SettlementState
+    receipt_root: str
+    qc_root: str
+    anchor_hash: Optional[str] = None
+    blockchain_anchor: Optional[Dict[str, Any]] = None
+    accepted_ngh: float = Field(0.0, ge=0)
+    rejected_ngh: float = Field(0.0, ge=0)
+    created_at: str
+    settled_at: Optional[str] = None
+
+
+class SettlementOnchainVerifyResponse(BaseModel):
+    settlement_id: str
+    tx_hash: Optional[str] = None
+    chain_reachable: bool
+    verified: bool
+    reason: Optional[str] = None
+    block_number: Optional[int] = None
+
+
 class PlatformEvent(BaseModel):
     """Minimal event shape used for audit-friendly demo state."""
 
@@ -635,6 +729,21 @@ class ComputeDeliveryResponse(BaseModel):
     delivery_status: str
 
 
+class ExecutionPreflightResponse(BaseModel):
+    position_id: str
+    job_id: str
+    ready_to_execute: bool
+    reasons: List[str] = Field(default_factory=list)
+    position_status: str
+    product_key_match: bool
+    required_ngh: float = Field(..., ge=0)
+    deposited_ngh: float = Field(..., ge=0)
+    voucher_gap_ngh: float = Field(..., ge=0)
+    milestone_sanity: Dict[str, bool] = Field(default_factory=dict)
+    matching_provider_count: int = Field(0, ge=0)
+    total_available_gpus: int = Field(0, ge=0)
+
+
 class ProviderSplitRequest(BaseModel):
     provider_id: str = Field(..., min_length=1, max_length=64)
     gpu_count: int = Field(..., ge=1, le=4)
@@ -651,6 +760,20 @@ class DemoProviderExecutionResponse(BaseModel):
     provider_id: str
     gpu_count: int
     factoring_summary: Dict[str, Any]
+    provider_reliability_score: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Observed provider reliability score used during matching",
+    )
+    receipt_signature: Optional[str] = Field(
+        None,
+        description="HMAC signature over provider execution payload for attestation",
+    )
+    indicative_price_per_ngh: Optional[float] = Field(
+        None,
+        description="Listing anchor price for this seller at match time (NGH notional / NGH)",
+    )
 
 
 class DemoRunRequest(BaseModel):
@@ -658,7 +781,12 @@ class DemoRunRequest(BaseModel):
     composite: str = Field(..., min_length=2)
     deposit_ngh: Optional[float] = Field(None, gt=0)
     auto_settle_if_open: bool = True
-    target_settle_seconds: int = Field(300, ge=30, le=3600)
+    target_settle_seconds: int = Field(
+        300,
+        ge=30,
+        le=31_622_400,
+        description="Futures settlement / delivery horizon (30s–366d)",
+    )
 
 
 class DemoRunResponse(BaseModel):
@@ -667,6 +795,12 @@ class DemoRunResponse(BaseModel):
     settlement_status: str
     settlement_target_seconds: int
     matched_gpu_count: int = Field(..., ge=1, le=4)
+    matched_seller_count: int = Field(
+        0,
+        ge=0,
+        le=4,
+        description="Distinct providers allocated (max 4); GPU count sums to matched_gpu_count",
+    )
     delivered_ngh: float = Field(..., ge=0)
     remaining_wallet_ngh: float = Field(..., ge=0)
     provider_executions: List[DemoProviderExecutionResponse]
@@ -677,6 +811,19 @@ class DemoRunResponse(BaseModel):
     verification_hash: str
     blockchain_anchor: DemoBlockchainAnchorResponse
     run_status: str
+    buyer_owner_id: Optional[str] = None
+    composite_to_factor: str = ""
+    futures_contract_notional: float = Field(0.0, ge=0)
+    futures_price_per_ngh: float = Field(0.0, ge=0)
+    futures_quantity_ngh: float = Field(0.0, ge=0)
+    consolidated_prime_factors: List[int] = Field(
+        default_factory=list,
+        description="Prime factors reported across all GPU runs (order preserved per provider)",
+    )
+    futures_product_key: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Region / hour / SLA / tier for the underlying futures leg",
+    )
 
 
 class DemoProgressStepStatus(str, Enum):
@@ -715,7 +862,7 @@ class FullDemoRunRequest(BaseModel):
     package_size_ngh: float = Field(10.0, gt=0, le=15.0)
     job_id: Optional[str] = None
     gpu_model_label: str = Field("demo-workload", min_length=1, max_length=64)
-    target_settle_seconds: int = Field(300, ge=30, le=3600)
+    target_settle_seconds: int = Field(300, ge=30, le=31_622_400)
 
 
 class FullDemoRunStartResponse(BaseModel):

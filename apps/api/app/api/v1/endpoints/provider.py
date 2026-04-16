@@ -17,6 +17,8 @@ from app.schemas.models import (
     PrepareReadyResponse,
     ResultRequest,
     ResultResponse,
+    SessionReadyRequest,
+    CollectiveSessionResponse,
 )
 
 
@@ -143,6 +145,17 @@ def submit_result(lot_id: str, request: ResultRequest):
         logs_uri=request.logs_uri,
         completed_at=updated_lot.completed_at or "",
     )
+
+
+@router.post("/sessions/{session_id}/ready", response_model=CollectiveSessionResponse)
+def attest_session_ready(session_id: str, request: SessionReadyRequest):
+    try:
+        return storage.attest_collective_session_ready(session_id, request.member_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if msg == "session_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg) from exc
 
 
 @router.get("/provider/sla", response_model=ProviderSlaSummaryResponse)

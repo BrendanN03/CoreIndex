@@ -11,6 +11,7 @@ from app.schemas.models import (
     JobStatus,
     ProductKey,
     RelayLink,
+    JobReceiptsResponse,
 )
 from app.services.feasibility import (
     calculate_earliest_start,
@@ -133,4 +134,14 @@ def get_job(job_id: str):
 
     job.relay_links = relay_links
     return job
+
+
+@router.get("/jobs/{job_id}/receipts", response_model=JobReceiptsResponse)
+def get_job_receipts(job_id: str):
+    if not storage.get_job(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with id '{job_id}' not found",
+        )
+    return storage.get_job_receipts(job_id)
 

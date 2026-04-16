@@ -57,14 +57,17 @@ def _run_remote_factoring(gpu_ids: list[int], composite: str) -> Any:
     connect_s, read_s = factoring_timeouts()
 
     try:
-        response = requests.post(
-            url,
-            json={
-                "gpu_count": len(gpu_ids),
-                "composite": composite,
-            },
-            timeout=(connect_s, read_s),
-        )
+        # Ignore HTTP(S)_PROXY for localhost / tunnel URLs — corporate proxies often wedge 127.0.0.1.
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(
+                url,
+                json={
+                    "gpu_count": len(gpu_ids),
+                    "composite": composite,
+                },
+                timeout=(connect_s, read_s),
+            )
     except requests.RequestException as exc:
         msg = str(exc)
         if (
@@ -78,6 +81,11 @@ def _run_remote_factoring(gpu_ids: list[int], composite: str) -> Any:
                 "Start the tunnel from your laptop, e.g. "
                 "ssh -N -L 8000:127.0.0.1:8000 you@GPU_HOST "
                 "(leave it running), with remote_factor_server on port 8000 on the GPU host."
+            )
+        elif "Read timed out" in msg or "ReadTimeout" in msg:
+            msg += (
+                " — Increase FACTORING_HTTP_READ_TIMEOUT_SECONDS in apps/api/.env "
+                "or set it to 0 for no read limit (long CADO-NFS jobs)."
             )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

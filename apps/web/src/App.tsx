@@ -11,7 +11,6 @@ import { Button } from './components/ui/button';
 import { AuthApi, type UserPublicDto } from './lib/api';
 import { Card } from './components/ui/card';
 import { MyJobs } from './components/MyJobs';
-import { PlatformPhasePanel } from './components/PlatformPhasePanel';
 import { MarketPhaseOnePanel } from './components/MarketPhaseOnePanel';
 import { OptionsPanel } from './components/OptionsPanel';
 import { PortfolioBlotter } from './components/PortfolioBlotter';
@@ -119,54 +118,61 @@ export default function App() {
 
       {/* Main Content */}
       <div className="container mx-auto px-4 py-6">
-        <PlatformPhasePanel signedIn={signedIn} role={user?.role ?? null} />
-
         {!signedIn ? (
-          <Card className="mt-6 bg-slate-900 border-slate-800 p-6">
+          <Card className="bg-slate-900 border-slate-800 p-6">
             <h2 className="text-slate-100">Sign in to continue</h2>
             <p className="text-slate-400 text-sm mt-2">
-              Register as a <span className="text-slate-200">buyer</span> to see the buyer demo UI,
-              or as a <span className="text-slate-200">seller</span> to see the provider demo UI.
+              Register as a <span className="text-slate-200">buyer</span> for the trading workspace,
+              or as a <span className="text-slate-200">seller</span> for the provider workspace.
             </p>
           </Card>
         ) : (
-          <Tabs defaultValue={homeTab} className="mt-6 w-full">
+          <Tabs defaultValue={homeTab} className="w-full">
             <TabsList className="bg-slate-900 border border-slate-800">
               {user?.role === 'buyer' ? (
-                <TabsTrigger value="buyer">Buyer (demo)</TabsTrigger>
+                <TabsTrigger value="buyer">Buyer</TabsTrigger>
               ) : (
-                <TabsTrigger value="provider">Provider (simulated)</TabsTrigger>
+                <TabsTrigger value="provider">Provider</TabsTrigger>
               )}
             </TabsList>
 
             <TabsContent value="buyer" className="mt-6">
               <Tabs defaultValue="futures" className="w-full">
                 <TabsList className="bg-slate-900 border border-slate-800">
-                  <TabsTrigger value="futures">Futures Desk (primary)</TabsTrigger>
+                  <TabsTrigger value="futures">Futures Desk</TabsTrigger>
                   <TabsTrigger value="options">Options Desk</TabsTrigger>
                   <TabsTrigger value="advanced">Advanced Market View</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="futures" className="mt-6 space-y-6">
                   <Card className="bg-slate-900 border-slate-800 p-4">
-                    <div className="text-slate-100">Quick Start</div>
+                    <div className="text-slate-100">Execution Flow</div>
                     <div className="mt-2 text-sm text-slate-400">
-                      Easiest: open Physical Delivery Funding and use <span className="text-slate-200">Run entire demo (one click)</span>
-                      (live step progress). Or create a job from the marketplace, buy exposure, then Run Full Demo Flow on a position.
+                      Open Physical Delivery Funding to create exposure, settle to vouchers, run preflight,
+                      execute CADO-NFS delivery, and verify settlement on-chain.
                     </div>
                   </Card>
-
-                  <GPUMarketplace
-                    onSelectGPU={setSelectedGPU}
-                    selectedGPU={selectedGPU}
-                    onJobCreated={() => setJobsRefreshTrigger((k) => k + 1)}
-                  />
-
-                  <MyJobs refreshTrigger={jobsRefreshTrigger} />
-
-                  <MarketPhaseOnePanel selectedGPU={selectedGPU} />
-
-                  <PortfolioBlotter />
+                  <Tabs defaultValue="trade" className="w-full">
+                    <TabsList className="bg-slate-900 border border-slate-800">
+                      <TabsTrigger value="trade">Trade and Execution</TabsTrigger>
+                      <TabsTrigger value="jobs">My Jobs</TabsTrigger>
+                      <TabsTrigger value="portfolio">Portfolio and Risk</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="trade" className="mt-6 space-y-6">
+                      <GPUMarketplace
+                        onSelectGPU={setSelectedGPU}
+                        selectedGPU={selectedGPU}
+                        onJobCreated={() => setJobsRefreshTrigger((k) => k + 1)}
+                      />
+                      <MarketPhaseOnePanel selectedGPU={selectedGPU} />
+                    </TabsContent>
+                    <TabsContent value="jobs" className="mt-6">
+                      <MyJobs refreshTrigger={jobsRefreshTrigger} />
+                    </TabsContent>
+                    <TabsContent value="portfolio" className="mt-6">
+                      <PortfolioBlotter />
+                    </TabsContent>
+                  </Tabs>
                 </TabsContent>
 
                 <TabsContent value="options" className="mt-6 space-y-6">

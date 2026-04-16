@@ -42,15 +42,11 @@ def get_platform_status():
     """
     Return visible platform metadata for the frontend shell.
 
-    This endpoint is intentionally lightweight and product-facing. It gives the
-    UI one stable place to discover active platform capabilities and recent
-    event activity.
+    Sync handler (Starlette thread pool) avoids stacking asyncio.to_thread work on the
+    same default executor used by other sync routes — that combination could starve
+    the pool during heavy demo traffic and make status look “offline”.
     """
-    return PlatformStatusResponse(
-        current_phase="live",
-        current_focus="Persistent market, execution, funding, and derivatives workflows",
-        api_version="1.0.0",
-        capabilities=[
+    capabilities = [
             "auth",
             "auth_persistence",
             "market_positions",
@@ -90,7 +86,16 @@ def get_platform_status():
             "market_simulation_engine",
             "live_market_data_feed",
             "one_click_demo_progress",
-        ],
-        event_count=storage.event_count(),
-        recent_events=storage.list_events(limit=8),
+        ]
+
+    event_count = storage.event_count()
+    recent_events = storage.list_events(limit=8)
+
+    return PlatformStatusResponse(
+        current_phase="live",
+        current_focus="Persistent market, execution, funding, and derivatives workflows",
+        api_version="1.0.0",
+        capabilities=capabilities,
+        event_count=event_count,
+        recent_events=recent_events,
     )
