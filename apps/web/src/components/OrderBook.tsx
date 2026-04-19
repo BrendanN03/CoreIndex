@@ -93,7 +93,7 @@ export function OrderBook({ selectedGPU }: OrderBookProps) {
       void refreshBook().catch(() => {
         // Keep current UI values if polling fails.
       });
-    }, 3000);
+    }, 1200);
     return () => clearInterval(interval);
   }, [selectedGPU]);
 

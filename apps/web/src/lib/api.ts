@@ -358,6 +358,11 @@ export type MarketPositionResponseDto = {
   notional: number;
   status: string;
   created_at: string;
+  closes_at?: string | null;
+  /** Requested close horizon at creation; used when `closes_at` is missing or unparsable. */
+  close_in_seconds?: number | null;
+  /** Server-computed seconds until close (preferred for UI countdown). */
+  seconds_until_close?: number | null;
   settled_at?: string | null;
   owner_id?: string | null;
 };
@@ -396,6 +401,9 @@ export type ExecutionPreflightResponseDto = {
   ready_to_execute: boolean;
   reasons: string[];
   position_status: string;
+  contract_closed: boolean;
+  closes_at?: string | null;
+  seconds_until_close: number;
   product_key_match: boolean;
   required_ngh: number;
   deposited_ngh: number;
@@ -446,6 +454,8 @@ export type DemoRunResponseDto = {
   futures_contract_notional?: number;
   futures_price_per_ngh?: number;
   futures_quantity_ngh?: number;
+  execution_market_price_per_ngh?: number | null;
+  execution_market_notional?: number | null;
   consolidated_prime_factors?: number[];
   futures_product_key?: ProductKeyDto | null;
 };
@@ -689,6 +699,10 @@ export type GpuBackendStatusDto = {
   tcp_error?: string | null;
   requests_installed: boolean;
   setup_hint: string;
+  /** e.g. `dev_remote_factor_server` when the in-repo stub answers at the factor base URL */
+  factor_backend_kind?: string | null;
+  /** Trial-division digit cap for the dev stub only */
+  dev_stub_max_composite_digits?: number | null;
 };
 
 export type PlatformEventDto = {
@@ -727,6 +741,7 @@ export type MarketLiveOverviewRowDto = {
   best_ask_per_ngh?: number | null;
   spread_per_ngh?: number | null;
   traded_volume_ngh_5m: number;
+  book_depth_ngh?: number;
   active_order_count: number;
 };
 
@@ -1141,6 +1156,8 @@ export const MarketApi = {
     side: PositionSideDto;
     quantity_ngh: number;
     price_per_ngh: number;
+    /** Futures close horizon in seconds (must match UI contract horizon). */
+    close_in_seconds: number;
   }): Promise<MarketPositionResponseDto> {
     return requestJson<MarketPositionResponseDto>('/market/positions', { method: 'POST', body });
   },
@@ -1207,8 +1224,10 @@ export const MarketApi = {
   async getStrategyMetrics(): Promise<StrategyExecutionMetricsResponseDto> {
     return requestJson('/market/strategy-metrics');
   },
-  async getLiveOverview(): Promise<MarketLiveOverviewResponseDto> {
-    return requestJson('/market/live/overview');
+  async getLiveOverview(options?: { groupBy?: 'gpu_model' | 'product_key' }): Promise<MarketLiveOverviewResponseDto> {
+    const q =
+      options?.groupBy === 'product_key' ? '?group_by=product_key' : '?group_by=gpu_model';
+    return requestJson(`/market/live/overview${q}`);
   },
   async getLiveOrderBook(
     q: ProductKeyDto | { gpu_model: string },

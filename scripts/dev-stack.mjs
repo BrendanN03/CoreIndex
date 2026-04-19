@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Starts FastAPI + Vite on fixed ports (override with env if needed).
- * Default API 8010 — leaves 8000 free for SSH → GPU factoring tunnel.
+ * Default API 8010. Starts local dev_remote_factor_server on 8000 unless COREINDEX_DEV_FACTOR_STUB=0.
  * Default web 5173.
  * Run from repo root: npm run dev
  */
@@ -131,7 +131,12 @@ async function main() {
   const apiEnvFile = loadDotEnvFile(path.join(apiDir, '.env'))
 
   console.log(`[dev-stack] API  → http://127.0.0.1:${apiPort}`)
-  console.log(`[dev-stack] Web  → http://127.0.0.1:${webPort}`)
+  console.log(
+    `[dev-stack] Judge chain (voucher + delivery ledger, not main web) → http://127.0.0.1:${apiPort}/judge-chain/`,
+  )
+  console.log(
+    `[dev-stack] Web  → http://127.0.0.1:${webPort} (same as http://localhost:${webPort} on this machine)`,
+  )
   console.log(`[dev-stack] Proxy /coreindex-api → ${proxyTarget}`)
   if (fs.existsSync(path.join(apiDir, '.env'))) {
     console.log('[dev-stack] Loaded apps/api/.env into API process (shell vars still override).')
@@ -162,12 +167,12 @@ async function main() {
         console.error('[dev-stack] Factor stub failed to start:', err.message)
       })
       console.log(
-        `[dev-stack] Factor stub → http://127.0.0.1:${factorStubPort} (dev_remote_factor_server; matches FACTORING_REMOTE_HTTP_URL on :8000)`,
+        `[dev-stack] Factor stub → http://127.0.0.1:${factorStubPort} (dev_remote_factor_server; set COREINDEX_DEV_FACTOR_STUB=0 to skip if you forward CADO here)`,
       )
       await new Promise((r) => setTimeout(r, 500))
     } else {
       console.warn(
-        `[dev-stack] COREINDEX_DEV_FACTOR_STUB=1 but port ${factorStubPort} is in use — start dev_remote_factor_server manually or free the port.`,
+        `[dev-stack] Factor stub wanted but port ${factorStubPort} is in use — assuming SSH tunnel or another server (COREINDEX_DEV_FACTOR_STUB=0 skips this message next time).`,
       )
     }
   }

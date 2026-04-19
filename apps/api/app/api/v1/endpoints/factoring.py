@@ -97,6 +97,18 @@ def _run_remote_factoring(gpu_ids: list[int], composite: str) -> Any:
             detail = response.json()
         except Exception:
             detail = response.text
+        # Client-side issues (composite shape, dev-stub digit cap) should surface as 422, not 502.
+        if response.status_code in (400, 422):
+            if isinstance(detail, dict) and "detail" in detail:
+                inner = detail.get("detail")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=inner if isinstance(inner, (str, list, dict)) else detail,
+                )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=detail,
+            )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={

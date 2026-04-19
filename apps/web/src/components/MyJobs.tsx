@@ -117,7 +117,7 @@ export function MyJobs({ refreshTrigger = 0 }: Props) {
             {jobs.length === 0 ? (
               <TableRow className="border-slate-800">
                 <TableCell colSpan={6} className="text-slate-400 text-sm">
-                  {loading ? 'Loading…' : 'No jobs yet. Create one from the marketplace (Connect).'}
+                  {loading ? 'Loading…' : 'No jobs yet. Create one from Wallet & job in Trade and Execution.'}
                 </TableCell>
               </TableRow>
             ) : (

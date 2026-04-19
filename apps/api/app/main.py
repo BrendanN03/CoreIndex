@@ -11,6 +11,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import router as api_v1_router
 from app.schemas.models import MarketSimulationStartRequest
@@ -41,11 +42,32 @@ app.add_middleware(
 
 app.include_router(api_v1_router)
 
+_judge_static = Path(__file__).resolve().parent / "static" / "judge_chain"
+if _judge_static.is_dir():
+    app.mount(
+        "/judge-chain",
+        StaticFiles(directory=str(_judge_static), html=True),
+        name="judge_chain",
+    )
+
 
 @app.get("/health")
 def health_check():
     """Liveness probe — no storage; use for proxy sanity checks."""
     return {"status": "ok", "service": "coreindex-api"}
+
+
+@app.on_event("startup")
+def _maybe_start_dev_factor_stub():
+    """Local http://127.0.0.1:* factor URL with nothing listening → spawn dev_remote_factor_server."""
+    try:
+        from app.dev_factor_stub_runner import start_if_configured
+
+        start_if_configured()
+    except Exception:
+        logging.getLogger("uvicorn.error").warning(
+            "dev_factor_stub startup skipped", exc_info=True
+        )
 
 
 @app.on_event("startup")
@@ -80,13 +102,19 @@ def _log_gpu_factoring_config():
 
 @app.on_event("startup")
 def _startup_market_simulator():
-    # Keep the advanced market view active by default for demo sessions.
+    # Strong default sim: crosses the book, prints tape volume, and refreshes limit ladders for all GPU venues.
     try:
+        buyers = int(os.getenv("COREINDEX_MARKET_SIM_BUYERS", "140"))
+        sellers = int(os.getenv("COREINDEX_MARKET_SIM_SELLERS", "140"))
+        tps = float(os.getenv("COREINDEX_MARKET_SIM_TPS", "8"))
+        buyers = max(1, min(buyers, 500))
+        sellers = max(1, min(sellers, 500))
+        tps = max(0.2, min(tps, 20.0))
         market_simulator.start(
             MarketSimulationStartRequest(
-                synthetic_buyer_agents=24,
-                synthetic_seller_agents=16,
-                ticks_per_second=1.25,
+                synthetic_buyer_agents=buyers,
+                synthetic_seller_agents=sellers,
+                ticks_per_second=tps,
             )
         )
     except Exception:
@@ -127,6 +155,18 @@ def _demo_voucher_wallet_topup():
     except Exception:
         logging.getLogger("uvicorn.error").warning(
             "DEMO_VOUCHER_WALLET_NGH top-up failed", exc_info=True
+        )
+
+
+@app.on_event("shutdown")
+def _shutdown_dev_factor_stub():
+    try:
+        from app.dev_factor_stub_runner import stop_if_started
+
+        stop_if_started()
+    except Exception:
+        logging.getLogger("uvicorn.error").warning(
+            "dev_factor_stub shutdown failed", exc_info=True
         )
 
 

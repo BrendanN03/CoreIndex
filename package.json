@@ -1,7 +1,7 @@
 {
   "name": "coreindex-workspace",
   "private": true,
-  "description": "Run API (8010) + web (5173). Optional local /factor stub: COREINDEX_DEV_FACTOR_STUB=1 (port 8000). Override ports via COREINDEX_DEV_* env vars.",
+  "description": "Run API (8010) + web (5173). Starts local /factor stub on 8000 unless COREINDEX_DEV_FACTOR_STUB=0. Override ports via COREINDEX_DEV_* env vars.",
   "scripts": {
     "dev": "node scripts/dev-stack.mjs",
     "start": "node scripts/dev-stack.mjs"

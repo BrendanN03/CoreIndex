@@ -11,12 +11,11 @@ Run from ``apps/api`` (with the same venv as the API)::
 Set in ``apps/api/.env``::
 
     FACTORING_REMOTE_HTTP_URL=http://127.0.0.1:8000
-
-For real CADO-NFS on GPUs, replace this with your tunnel + ``remote_factor_server`` on the host.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -25,8 +24,12 @@ from pydantic import BaseModel, Field, field_validator
 
 app = FastAPI(title="CoreIndex dev factor stub", version="0.1.0")
 
-# Trial division is fine for demo-sized N; huge inputs should use the real GPU server.
-_MAX_TRIAL_DIGITS = 22
+# SymPy factorization for demo-sized composites (override via env for local tuning).
+_MAX_COMPOSITE_DIGITS = int(os.environ.get("DEV_STUB_MAX_COMPOSITE_DIGITS", "64"))
+# Legacy name — ``gpu_backend_config`` probes this for UI limits.
+_MAX_TRIAL_DIGITS = _MAX_COMPOSITE_DIGITS
+
+_TRIAL_FALLBACK_MAX_DIGITS = 22
 
 
 def _trial_prime_factors(n: int) -> list[int]:
@@ -47,6 +50,16 @@ def _trial_prime_factors(n: int) -> list[int]:
     return factors
 
 
+def _prime_factors_via_sympy(n: int) -> list[int]:
+    from sympy import factorint
+
+    fac: dict[int, int] = factorint(n)
+    out: list[int] = []
+    for p in sorted(fac.keys()):
+        out.extend([p] * fac[p])
+    return out
+
+
 class FactorBody(BaseModel):
     gpu_count: int = Field(..., ge=1, le=64)
     composite: str = Field(..., min_length=2)
@@ -61,28 +74,42 @@ class FactorBody(BaseModel):
 
 
 @app.get("/")
-def root() -> dict[str, str]:
-    return {"service": "dev_remote_factor_server", "post": "/factor"}
+def root() -> dict[str, Any]:
+    return {
+        "service": "dev_remote_factor_server",
+        "post": "/factor",
+        "max_composite_digits": _MAX_COMPOSITE_DIGITS,
+    }
 
 
 @app.post("/factor")
 def factor(req: FactorBody) -> dict[str, Any]:
     digits = req.composite
-    if len(digits) > _MAX_TRIAL_DIGITS:
+    if len(digits) > _MAX_COMPOSITE_DIGITS:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"dev_stub: composite too long ({len(digits)} digits; max {_MAX_TRIAL_DIGITS} for "
-                "trial division). Use the real remote_factor_server + CADO for large N."
+                f"composite too long ({len(digits)} digits; max {_MAX_COMPOSITE_DIGITS} for this demo service)"
             ),
         )
     n = int(digits)
     t0 = time.perf_counter()
-    factors = _trial_prime_factors(n)
+    try:
+        if len(digits) <= _TRIAL_FALLBACK_MAX_DIGITS:
+            factors = _trial_prime_factors(n)
+            method = "dev_trial_division_stub"
+        else:
+            factors = _prime_factors_via_sympy(n)
+            method = "sympy_factorint_stub"
+    except Exception as exc:  # pragma: no cover — defensive for odd SymPy inputs
+        raise HTTPException(
+            status_code=422,
+            detail=f"factorization failed for this composite: {exc}",
+        ) from exc
     elapsed = time.perf_counter() - t0
 
     summary: dict[str, Any] = {
-        "method": "dev_trial_division_stub",
+        "method": method,
         "input_n": digits,
         "final_prime_factors": factors,
         "ecm_elapsed_sec": round(elapsed * 0.25 + 0.0001, 6),
@@ -90,9 +117,5 @@ def factor(req: FactorBody) -> dict[str, Any]:
         "total_elapsed_sec": round(elapsed + 0.0002, 6),
         "cado_runs": [],
         "gpu_devices": [f"dev-stub-gpu-{i}" for i in range(min(req.gpu_count, 8))],
-        "note": (
-            "Local dev stub — not CADO-NFS. For production, run remote_factor_server on the GPU "
-            "host and SSH tunnel to FACTORING_REMOTE_HTTP_URL."
-        ),
     }
     return {"summary": summary}

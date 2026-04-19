@@ -6,26 +6,20 @@ import { Input } from './ui/input';
 import { Server, MapPin, Zap, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  JobApi,
   ProviderApi,
-  type JobCreateRequestDto,
   type MarketplaceGpuListingResponseDto,
 } from '../lib/api';
 
 interface GPUMarketplaceProps {
   onSelectGPU: (gpu: string) => void;
   selectedGPU: string;
-  /** Called after a job is successfully created (e.g. to refresh My Jobs). */
-  onJobCreated?: () => void;
 }
 
-export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMarketplaceProps) {
+export function GPUMarketplace({ onSelectGPU, selectedGPU }: GPUMarketplaceProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [regionFilter, setRegionFilter] = useState<'all' | 'us' | 'eu' | 'asia'>('all');
   const [sortBy, setSortBy] = useState<'price' | 'availability'>('price');
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isCreating, setIsCreating] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [listings, setListings] = useState<MarketplaceGpuListingResponseDto[]>([]);
 
@@ -71,7 +65,6 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
         (row) =>
           !q ||
           row.gpu_model.toLowerCase().includes(q) ||
-          row.provider_id.toLowerCase().includes(q) ||
           row.region.toLowerCase().includes(q),
       )
       .sort((a, b) => {
@@ -80,61 +73,10 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
       });
   }, [listings, searchQuery, regionFilter, sortBy]);
 
-  async function handleConnectClick(gpu: MarketplaceGpuListingResponseDto) {
-    onSelectGPU(gpu.gpu_model);
-    setStatus(null);
-    setError(null);
-    setIsCreating(true);
-
-    try {
-      const now = new Date();
-      const utcHour = now.getUTCHours();
-
-      const body: JobCreateRequestDto = {
-        job_id: `job-${Date.now()}`,
-        window: {
-          region: gpu.region,
-          iso_hour: gpu.iso_hour ?? utcHour,
-          sla: gpu.sla,
-          tier: gpu.tier,
-        },
-        package_index: [
-          {
-            package_id: `pkg-${Date.now()}`,
-            size_estimate_ngh: Math.max(1, Math.min(10, gpu.ngh_available)),
-            first_output_estimate_seconds: 60,
-            metadata: {
-              gpu_name: gpu.gpu_model,
-              provider: gpu.provider_id,
-              listing_id: gpu.listing_id,
-            },
-          },
-        ],
-      };
-
-      await JobApi.createJob(body);
-      const feas = await JobApi.getFeasibility(body.job_id);
-
-      setStatus(
-        `Created job ${body.job_id}: NGH=${feas.ngh_required.toFixed(
-          2,
-        )}, voucher_gap=${feas.voucher_gap.toFixed(2)}, ` +
-          `first_output_ok=${feas.milestone_sanity.first_output_ok ? 'yes' : 'no'}, ` +
-          `size_band_ok=${feas.milestone_sanity.size_band_ok ? 'yes' : 'no'}`,
-      );
-      onJobCreated?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setStatus('Failed to create job from selected provider listing.');
-    } finally {
-      setIsCreating(false);
-    }
-  }
-
   return (
     <Card className="bg-slate-900 border-slate-800 p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-slate-100">Available GPU Compute (Live Seller Listings)</h2>
+        <h2 className="text-slate-100">Live Seller Liquidity (Market-assigned at execution)</h2>
         <div className="flex gap-2">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -155,6 +97,10 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
           </Button>
         </div>
       </div>
+      <p className="mb-4 text-xs text-slate-400">
+        Listings are indicative supply for each compute class. Buyers do not bind to a specific seller here:
+        matching is market-assigned during execution using price, capacity, and reliability.
+      </p>
 
       <Tabs value={regionFilter} onValueChange={(v) => setRegionFilter(v as 'all' | 'us' | 'eu' | 'asia')} className="mb-4">
         <TabsList className="bg-slate-800">
@@ -247,26 +193,13 @@ export function GPUMarketplace({ onSelectGPU, selectedGPU, onJobCreated }: GPUMa
                   <div className="text-sm text-slate-100">{gpu.ngh_available.toFixed(2)} NGH</div>
                 </div>
               </div>
-              <Button
-                size="sm"
-                className="bg-blue-600 hover:bg-blue-700"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleConnectClick(gpu);
-                }}
-                disabled={isCreating}
-              >
-                {isCreating ? 'Connecting...' : 'Connect'}
-              </Button>
+              <Badge variant="outline" className="border-slate-700 text-slate-300">
+                Market-assigned
+              </Badge>
             </div>
           </div>
         ))}
       </div>
-      {status && (
-        <div className="mt-4 text-xs text-slate-300 border-t border-slate-800 pt-3">
-          {status}
-        </div>
-      )}
     </Card>
   );
 }

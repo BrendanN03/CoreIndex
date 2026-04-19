@@ -162,7 +162,6 @@ export default function App() {
                       <GPUMarketplace
                         onSelectGPU={setSelectedGPU}
                         selectedGPU={selectedGPU}
-                        onJobCreated={() => setJobsRefreshTrigger((k) => k + 1)}
                       />
                       <MarketPhaseOnePanel selectedGPU={selectedGPU} />
                     </TabsContent>

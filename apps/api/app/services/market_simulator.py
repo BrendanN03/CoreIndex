@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import os
 import random
 import threading
 import time
@@ -171,18 +172,20 @@ class MarketSimulatorEngine:
         if not buyers or not sellers:
             return
 
-        demo_key = storage.get_demo_product_key().as_storage_key()
+        burst_lo = int(os.getenv("COREINDEX_MARKET_SIM_BURST_MIN", "6"))
+        burst_hi = int(os.getenv("COREINDEX_MARKET_SIM_BURST_MAX", "14"))
+        burst_lo = max(2, min(burst_lo, 40))
+        burst_hi = max(burst_lo, min(burst_hi, 48))
+
         for template in self._templates:
             key = template.product_key()
-            if key.as_storage_key() == demo_key:
-                continue
 
-            # Random walk anchor
-            drift = (self._rng.random() - 0.5) * 0.08 * template.base_price
+            # Random walk anchor (wider so mid and prints drift visibly).
+            drift = (self._rng.random() - 0.5) * 0.22 * max(template.base_price, 0.1)
             anchor = max(0.05, self._price_anchors.get(template.gpu_model, template.base_price) + drift)
             self._price_anchors[template.gpu_model] = anchor
 
-            if self._tick_count % 12 == 0:
+            if self._tick_count % 6 == 0:
                 provider_id = self._rng.choice(sellers)
                 ngh_available = round(self._rng.uniform(15.0, 120.0), 2)
                 gpu_count = self._rng.randint(1, 8)
@@ -202,14 +205,14 @@ class MarketSimulatorEngine:
                 except ValueError:
                     pass
 
-            for _ in range(self._rng.randint(2, 6)):
+            # Prices must span *both* sides of the anchor so bids can cross asks and print volume.
+            for _ in range(self._rng.randint(burst_lo, burst_hi)):
                 side = ExchangeOrderSide.BUY if self._rng.random() < 0.5 else ExchangeOrderSide.SELL
                 owner_id = self._rng.choice(buyers if side == ExchangeOrderSide.BUY else sellers)
-                spread = 0.01 + self._rng.random() * 0.08
-                signed_spread = -spread if side == ExchangeOrderSide.BUY else spread
-                price = round(max(0.05, anchor * (1 + signed_spread)), 2)
-                quantity = round(self._rng.uniform(0.5, 8.0), 2)
-                tif = TimeInForce.GTC if self._rng.random() < 0.88 else TimeInForce.IOC
+                rel = (self._rng.random() - 0.5) * 0.34
+                price = round(max(0.05, anchor * (1.0 + rel)), 2)
+                quantity = round(self._rng.uniform(0.8, 22.0), 2)
+                tif = TimeInForce.IOC if self._rng.random() < 0.42 else TimeInForce.GTC
                 try:
                     storage.create_exchange_order(
                         ExchangeOrderCreateRequest(
@@ -227,6 +230,53 @@ class MarketSimulatorEngine:
                         self._synthetic_order_count += 1
                 except ValueError:
                     continue
+
+            # Aggressive IOC sweeps — guarantees activity even when the random cloud is one-sided.
+            try:
+                book = storage.get_exchange_orderbook(key)
+                if book.best_ask is not None and self._rng.random() < 0.62:
+                    sweep_px = round(float(book.best_ask) * (1.0 + self._rng.uniform(0.0, 0.08)), 2)
+                    sweep_qty = round(self._rng.uniform(2.5, 28.0), 2)
+                    storage.create_exchange_order(
+                        ExchangeOrderCreateRequest(
+                            product_key=key,
+                            side=ExchangeOrderSide.BUY,
+                            price_per_ngh=sweep_px,
+                            quantity_ngh=sweep_qty,
+                            time_in_force=TimeInForce.IOC,
+                            subaccount_id="sim-main",
+                            strategy_tag="sim-sweep",
+                        ),
+                        owner_id=self._rng.choice(buyers),
+                    )
+                    with self._lock:
+                        self._synthetic_order_count += 1
+                book = storage.get_exchange_orderbook(key)
+                if book.best_bid is not None and self._rng.random() < 0.62:
+                    sweep_px = round(float(book.best_bid) * (1.0 - self._rng.uniform(0.0, 0.08)), 2)
+                    sweep_qty = round(self._rng.uniform(2.5, 28.0), 2)
+                    storage.create_exchange_order(
+                        ExchangeOrderCreateRequest(
+                            product_key=key,
+                            side=ExchangeOrderSide.SELL,
+                            price_per_ngh=max(0.05, sweep_px),
+                            quantity_ngh=sweep_qty,
+                            time_in_force=TimeInForce.IOC,
+                            subaccount_id="sim-main",
+                            strategy_tag="sim-sweep",
+                        ),
+                        owner_id=self._rng.choice(sellers),
+                    )
+                    with self._lock:
+                        self._synthetic_order_count += 1
+            except Exception:
+                pass
+
+            if self._tick_count % 7 == 0:
+                try:
+                    storage.prune_synthetic_open_orders_for_key(key, keep=220)
+                except Exception:
+                    pass
 
 
 market_simulator = MarketSimulatorEngine()

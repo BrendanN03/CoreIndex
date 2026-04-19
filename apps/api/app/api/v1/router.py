@@ -5,6 +5,7 @@ from app.api.v1.endpoints import (
     exchange,
     factoring,
     jobs,
+    judge_demo,
     market,
     options,
     platform,
@@ -30,3 +31,4 @@ router.include_router(sessions.router, tags=["sessions"])
 router.include_router(settlement.router, tags=["settlement"])
 router.include_router(vouchers.router, tags=["vouchers"])
 router.include_router(platform.router, tags=["platform"])
+router.include_router(judge_demo.router, prefix="/demo", tags=["judge-demo"])

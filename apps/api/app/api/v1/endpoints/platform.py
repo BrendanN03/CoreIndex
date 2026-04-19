@@ -4,6 +4,7 @@ from app.gpu_backend_config import (
     factoring_base_url,
     factoring_post_url,
     factoring_ssh_host_label,
+    probe_factor_http_identity,
     probe_gpu_backend_tcp,
     setup_instructions_hint,
 )
@@ -26,6 +27,10 @@ def _requests_installed() -> bool:
 def get_gpu_backend_status():
     """Whether the CoreIndex API can reach the remote GPU factoring HTTP service (TCP probe)."""
     tcp_ok, tcp_err = probe_gpu_backend_tcp()
+    kind: str | None = None
+    stub_digits: int | None = None
+    if tcp_ok:
+        kind, stub_digits = probe_factor_http_identity()
     return GpuBackendStatusResponse(
         configured_base_url=factoring_base_url(),
         factor_post_url=factoring_post_url(),
@@ -34,6 +39,8 @@ def get_gpu_backend_status():
         tcp_error=tcp_err,
         requests_installed=_requests_installed(),
         setup_hint=setup_instructions_hint(),
+        factor_backend_kind=kind,
+        dev_stub_max_composite_digits=stub_digits,
     )
 
 

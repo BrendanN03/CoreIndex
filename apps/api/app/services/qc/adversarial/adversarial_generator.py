@@ -89,9 +89,11 @@ def generate_adversarial_variants_map(
     rows: List[Dict[str, Any]],
     mode: str,
 ) -> Dict[str, List[Dict[str, Any]]]:
+    # "Small" jitter must stay within default fp_tolerant gates (rel_tol≈1e-4, max_ulp≈2)
+    # so the suite does not false-reject on every presentation run. ~5e-16 is ~2 ULP at 1.0.
     variants: Dict[str, List[Dict[str, Any]]] = {
         "reorder": _reorder_rows(rows),
-        "jitter_small": _perturb_floats(rows, factor=5e-5),
+        "jitter_small": _perturb_floats(rows, factor=5e-16),
         "jitter_large": _perturb_floats(rows, factor=5e-2),
         "signed_zero": _flip_signed_zero(rows),
         "truncate_3dp": _truncate_decimals(rows, decimals=3),

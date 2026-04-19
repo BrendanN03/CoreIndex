@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -229,6 +229,54 @@ class PlatformEvent(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VoucherLedgerOp(BaseModel):
+    """Single simulated multi-token ledger step (ERC-1155 style narrative over platform events)."""
+
+    op_kind: str
+    title: str
+    detail: str
+    event_type: str
+    event_id: str
+    created_at: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class VoucherChainBlock(BaseModel):
+    """One logical block keyed off an accepted compute delivery (same job/position as the main UI)."""
+
+    block_index: int
+    chain_height: int
+    prev_block_hash: Optional[str] = None
+    block_hash: str
+    appended_at: str
+    job_id: str
+    position_id: str
+    delivery_event_id: str
+    delivery_created_at: str
+    delivered_ngh: Optional[float] = None
+    verification_hash: Optional[str] = None
+    verification_passed: Optional[bool] = None
+    blockchain_anchor: Optional[Dict[str, Any]] = None
+    demo_mode: Optional[str] = None
+    related_ops: List[VoucherLedgerOp] = Field(default_factory=list)
+    delivery_op: VoucherLedgerOp
+
+
+class VoucherChainLedgerResponse(BaseModel):
+    """Voucher escrow + settlement anchors + delivery commits as an append-only chain."""
+
+    generated_at: str
+    event_window: int
+    chain_length: int = 0
+    chain_head_hash: Optional[str] = None
+    blocks: List[VoucherChainBlock] = Field(default_factory=list)
+
+# Backward-compatible aliases while older imports are migrated.
+JudgeLedgerOp = VoucherLedgerOp
+JudgeChainBlock = VoucherChainBlock
+JudgeChainLedgerResponse = VoucherChainLedgerResponse
+
+
 class PlatformStatusResponse(BaseModel):
     """Visible platform metadata exposed to the frontend shell."""
 
@@ -250,6 +298,9 @@ class GpuBackendStatusResponse(BaseModel):
     tcp_error: Optional[str] = None
     requests_installed: bool = True
     setup_hint: str
+    # When reachable, optional probe of GET {base}/ — dev stub reports service name + trial limit.
+    factor_backend_kind: Optional[str] = None
+    dev_stub_max_composite_digits: Optional[int] = None
 
 
 class PositionSide(str, Enum):
@@ -305,6 +356,23 @@ class MarketPositionCreateRequest(BaseModel):
     side: PositionSide = PositionSide.BUY
     quantity_ngh: float = Field(..., gt=0)
     price_per_ngh: float = Field(..., gt=0)
+    close_in_seconds: int = Field(
+        default=300,
+        ge=0,
+        le=31_622_400,
+        description="Seconds from creation until the futures contract closes (0 = already closed).",
+    )
+
+    @field_validator("close_in_seconds", mode="before")
+    @classmethod
+    def _coerce_close_in_seconds(cls, value: object) -> object:
+        """JSON may send floats; coerce so the horizon is never dropped to the default by validation noise."""
+        if value is None:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return value
 
 
 class MarketPositionResponse(BaseModel):
@@ -318,6 +386,18 @@ class MarketPositionResponse(BaseModel):
     notional: float
     status: MarketPositionStatus
     created_at: str
+    closes_at: Optional[str] = None
+    close_in_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=31_622_400,
+        description="Echo of requested close horizon at creation; used if closes_at is absent or unparsable.",
+    )
+    seconds_until_close: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Seconds remaining until close; recomputed on each list/create response (not persisted).",
+    )
     settled_at: Optional[str] = None
     owner_id: Optional[str] = None
 
@@ -735,6 +815,9 @@ class ExecutionPreflightResponse(BaseModel):
     ready_to_execute: bool
     reasons: List[str] = Field(default_factory=list)
     position_status: str
+    contract_closed: bool
+    closes_at: Optional[str] = None
+    seconds_until_close: int = Field(..., ge=0)
     product_key_match: bool
     required_ngh: float = Field(..., ge=0)
     deposited_ngh: float = Field(..., ge=0)
@@ -816,6 +899,16 @@ class DemoRunResponse(BaseModel):
     futures_contract_notional: float = Field(0.0, ge=0)
     futures_price_per_ngh: float = Field(0.0, ge=0)
     futures_quantity_ngh: float = Field(0.0, ge=0)
+    execution_market_price_per_ngh: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Market-derived execution clearing price from matched seller liquidity",
+    )
+    execution_market_notional: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Execution NGH multiplied by the market-derived clearing price",
+    )
     consolidated_prime_factors: List[int] = Field(
         default_factory=list,
         description="Prime factors reported across all GPU runs (order preserved per provider)",
@@ -877,6 +970,8 @@ class MarketLiveOverviewRow(BaseModel):
     best_ask_per_ngh: Optional[float] = Field(None, ge=0)
     spread_per_ngh: Optional[float] = Field(None, ge=0)
     traded_volume_ngh_5m: float = Field(..., ge=0)
+    """Resting bid+ask size (NGH) on the book — moves with simulated liquidity."""
+    book_depth_ngh: float = Field(0.0, ge=0)
     active_order_count: int = Field(..., ge=0)
 
 

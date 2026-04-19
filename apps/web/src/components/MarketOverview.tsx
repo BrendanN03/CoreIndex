@@ -1,13 +1,21 @@
 import { Card } from './ui/card';
 import { TrendingUp, TrendingDown } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { MarketApi, type MarketLiveOverviewRowDto } from '../lib/api';
+
+function rowKey(row: MarketLiveOverviewRowDto): string {
+  const pk = row.product_key;
+  return `${row.gpu_model}|${pk.region}|${pk.iso_hour}|${pk.sla}|${pk.tier}`;
+}
 
 export function MarketOverview() {
   const [stats, setStats] = useState<MarketLiveOverviewRowDto[]>([]);
   const [loading, setLoading] = useState(false);
-  const [lastPrices, setLastPrices] = useState<Record<string, number>>({});
+  /** Last poll's last_price per row key (updated after each successful fetch). */
+  const prevLastByKey = useRef<Record<string, number>>({});
+  /** % move since previous poll (same keys as rows). */
+  const [changeByKey, setChangeByKey] = useState<Record<string, number>>({});
   const [sortBy, setSortBy] = useState<'price' | 'volume' | 'spread' | 'orders'>('volume');
 
   useEffect(() => {
@@ -15,17 +23,17 @@ export function MarketOverview() {
     async function refresh() {
       setLoading(true);
       try {
-        const response = await MarketApi.getLiveOverview();
+        const response = await MarketApi.getLiveOverview({ groupBy: 'product_key' });
         if (cancelled) return;
-        setLastPrices((previous) => {
-          const next = { ...previous };
-          response.rows.forEach((row) => {
-            if (next[row.gpu_model] === undefined) {
-              next[row.gpu_model] = row.last_price_per_ngh;
-            }
-          });
-          return next;
-        });
+        const snap = { ...prevLastByKey.current };
+        const nextChange: Record<string, number> = {};
+        for (const row of response.rows) {
+          const k = rowKey(row);
+          const prev = snap[k] ?? row.last_price_per_ngh;
+          nextChange[k] = prev > 0 ? ((row.last_price_per_ngh - prev) / prev) * 100 : 0;
+          prevLastByKey.current[k] = row.last_price_per_ngh;
+        }
+        setChangeByKey(nextChange);
         setStats(response.rows);
       } finally {
         if (!cancelled) setLoading(false);
@@ -34,7 +42,7 @@ export function MarketOverview() {
     void refresh().catch(() => undefined);
     const interval = setInterval(() => {
       void refresh().catch(() => undefined);
-    }, 4000);
+    }, 1800);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -55,8 +63,10 @@ export function MarketOverview() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs text-slate-400">
-          {loading ? 'Refreshing market data...' : 'Live product-level market snapshot across all available compute tiers'}
+        <div className="text-xs text-slate-400 max-w-[52rem] leading-relaxed">
+          {loading
+            ? 'Refreshing market data...'
+            : 'Live mid-prices and 5m tape volume per venue (sim agents cross the spread + IOC sweeps). Book depth shows resting NGH on each ladder.'}
         </div>
         <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
           <SelectTrigger className="w-56 bg-slate-800 border-slate-700">
@@ -73,17 +83,12 @@ export function MarketOverview() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       {sortedStats.map((stat) => (
         <Card
-          key={
-            stat.gpu_model +
-            stat.product_key.region +
-            stat.product_key.tier +
-            stat.product_key.iso_hour
-          }
+          key={rowKey(stat)}
           className="bg-slate-900 border-slate-800 p-4 hover:border-slate-700 transition-colors"
         >
           {(() => {
-            const previous = lastPrices[stat.gpu_model] ?? stat.last_price_per_ngh;
-            const changePct = previous > 0 ? ((stat.last_price_per_ngh - previous) / previous) * 100 : 0;
+            const k = rowKey(stat);
+            const changePct = changeByKey[k] ?? 0;
             const positive = changePct >= 0;
             return (
           <div className="flex justify-between items-start mb-2">
@@ -99,7 +104,9 @@ export function MarketOverview() {
             );
           })()}
           <div className="text-sm text-slate-400">
-            Vol(5m): {stat.traded_volume_ngh_5m.toFixed(2)} NGH
+            Tape vol (5m): {stat.traded_volume_ngh_5m.toFixed(2)} NGH
+            <span className="text-slate-500"> · Book depth: </span>
+            {(stat.book_depth_ngh ?? 0).toFixed(1)} NGH
           </div>
           <div className="text-xs text-slate-500 mt-1">
             {stat.product_key.region} · {stat.product_key.iso_hour}h · {stat.product_key.sla} ·{' '}

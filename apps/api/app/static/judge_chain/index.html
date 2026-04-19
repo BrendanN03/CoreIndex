@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CoreIndex — Judge chain (voucher + settlement + delivery)</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --card: #121a30;
+        --muted: #8b9bb8;
+        --text: #e8eefc;
+        --accent: #5eead4;
+        --border: #243050;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.45;
+        min-height: 100vh;
+      }
+      header {
+        padding: 1.25rem 1.5rem;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(120deg, #0f172a 0%, #0b1020 60%);
+      }
+      header h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.15rem;
+        font-weight: 600;
+      }
+      header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+        max-width: 52rem;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+        padding: 0.75rem 1.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      button {
+        background: #1e3a5f;
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 0.45rem 0.9rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.875rem;
+      }
+      button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      #status {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      main {
+        padding: 1rem 1.5rem 2.5rem;
+        max-width: 960px;
+        margin: 0 auto;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 2rem 0;
+      }
+      .block {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--card);
+        margin-bottom: 1.25rem;
+        overflow: hidden;
+      }
+      .block-head {
+        padding: 0.85rem 1rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1.25rem;
+        align-items: baseline;
+      }
+      .block-head strong {
+        color: var(--accent);
+        font-size: 0.95rem;
+      }
+      .block-head span {
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .ops {
+        padding: 0.5rem 0;
+      }
+      .op {
+        padding: 0.65rem 1rem;
+        border-top: 1px solid #1a2744;
+        font-size: 0.88rem;
+      }
+      .op:first-child {
+        border-top: none;
+      }
+      .op-kind {
+        display: inline-block;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #94a3b8;
+        margin-bottom: 0.2rem;
+      }
+      .op-title {
+        font-weight: 600;
+        margin-bottom: 0.15rem;
+      }
+      .op-detail {
+        color: var(--muted);
+        font-size: 0.82rem;
+        word-break: break-word;
+      }
+      pre.meta {
+        margin: 0;
+        padding: 0.75rem 1rem 1rem;
+        background: #0a0f1a;
+        font-size: 0.72rem;
+        overflow-x: auto;
+        color: #cbd5e1;
+        border-top: 1px solid var(--border);
+      }
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Simulated ERC-1155 voucher ledger + delivery chain</h1>
+      <p>
+        This page is served by the API (not the main Vite app). Each <strong>block</strong> is one
+        <code>delivery.compute_run_completed</code> event from the same in-memory store the exchange
+        UI uses. Blocks are hash-linked append-only records, and each block carries voucher escrow +
+        settlement rows relevant to that job in the flow leading into accepted delivery. Refresh
+        after completing a demo run or delivery in the main product.
+      </p>
+    </header>
+    <div class="toolbar">
+      <button type="button" id="refresh">Refresh</button>
+      <span id="status">Loading…</span>
+    </div>
+    <main id="root"></main>
+    <script>
+      async function loadLedger() {
+        const status = document.getElementById('status')
+        const root = document.getElementById('root')
+        status.textContent = 'Loading…'
+        root.innerHTML = ''
+        try {
+          const res = await fetch('/demo/judge-chain-ledger', { headers: { Accept: 'application/json' } })
+          if (!res.ok) {
+            status.textContent = 'Error ' + res.status + ': ' + (await res.text()).slice(0, 200)
+            return
+          }
+          const data = await res.json()
+          status.textContent =
+            'Events scanned: ' +
+            data.event_window +
+            ' · Chain length: ' +
+            data.chain_length +
+            ' · Blocks shown: ' +
+            data.blocks.length +
+            ' · Head: ' +
+            (data.chain_head_hash ? String(data.chain_head_hash).slice(0, 14) + '…' : 'none') +
+            ' · Generated ' +
+            data.generated_at
+          if (!data.blocks.length) {
+            root.innerHTML =
+              '<div class="empty">No completed deliveries yet. Run a job + accepted delivery (e.g. demo run) on the main UI, then refresh.</div>'
+            return
+          }
+          for (const b of data.blocks) {
+            const el = document.createElement('article')
+            el.className = 'block'
+            const head = document.createElement('div')
+            head.className = 'block-head'
+            head.innerHTML =
+              '<div><strong>Block ' +
+              b.block_index +
+              '</strong> — delivery commit</div>' +
+              '<div><span>hash</span> <code>' +
+              escapeHtml((b.block_hash || '').slice(0, 20) + '…') +
+              '</code></div>' +
+              '<div><span>prev</span> <code>' +
+              escapeHtml(b.prev_block_hash ? b.prev_block_hash.slice(0, 14) + '…' : 'genesis') +
+              '</code></div>' +
+              '<div><span>job</span> <code>' +
+              escapeHtml(b.job_id) +
+              '</code></div>' +
+              '<div><span>position</span> <code>' +
+              escapeHtml(b.position_id) +
+              '</code></div>' +
+              '<div><span>time</span> ' +
+              escapeHtml(b.delivery_created_at) +
+              '</div>'
+            const ops = document.createElement('div')
+            ops.className = 'ops'
+            for (const op of b.related_ops) {
+              ops.appendChild(renderOp(op))
+            }
+            ops.appendChild(renderOp(b.delivery_op))
+            const pre = document.createElement('pre')
+            pre.className = 'meta'
+            pre.textContent = JSON.stringify(
+              {
+                delivered_ngh: b.delivered_ngh,
+                verification_hash: b.verification_hash,
+                verification_passed: b.verification_passed,
+                block_hash: b.block_hash,
+                prev_block_hash: b.prev_block_hash,
+                appended_at: b.appended_at,
+                demo_mode: b.demo_mode,
+                blockchain_anchor: b.blockchain_anchor,
+              },
+              null,
+              2
+            )
+            el.appendChild(head)
+            el.appendChild(ops)
+            el.appendChild(pre)
+            root.appendChild(el)
+          }
+        } catch (e) {
+          status.textContent = String(e)
+        }
+      }
+      function renderOp(op) {
+        const d = document.createElement('div')
+        d.className = 'op'
+        d.innerHTML =
+          '<div class="op-kind">' +
+          escapeHtml(op.op_kind) +
+          ' · ' +
+          escapeHtml(op.event_type) +
+          '</div>' +
+          '<div class="op-title">' +
+          escapeHtml(op.title) +
+          '</div>' +
+          '<div class="op-detail">' +
+          escapeHtml(op.detail) +
+          '</div>'
+        return d
+      }
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+      }
+      document.getElementById('refresh').addEventListener('click', loadLedger)
+      loadLedger()
+    </script>
+  </body>
+</html>

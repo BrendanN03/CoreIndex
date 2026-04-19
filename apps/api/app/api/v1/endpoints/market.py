@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -13,6 +13,7 @@ from app.api.v1.endpoints.auth import get_current_user_optional
 from app.api.v1.endpoints.factoring import _build_gpu_ids, _run_remote_factoring
 from app.repositories.memory.storage import storage
 from app.services.market_simulator import market_simulator
+from app.services.position_contract import seconds_until_contract_close
 from app.services.feasibility import calculate_ngh_required, check_milestone_sanity
 from app.schemas.models import (
     ComputeDeliveryRequest,
@@ -330,6 +331,9 @@ def _build_execution_preflight(
             detail="only_buy_positions_can_execute",
         )
 
+    seconds_until_close = seconds_until_contract_close(position)
+    contract_closed = seconds_until_close <= 0
+
     reasons: List[str] = []
     product_key_match = False
     required_ngh = 0.0
@@ -371,6 +375,8 @@ def _build_execution_preflight(
 
     if position.status.value != "settled":
         reasons.append("position_must_be_settled_before_execution")
+    if not contract_closed:
+        reasons.append(f"contract_not_closed_yet:{seconds_until_close}s_remaining")
 
     listings = [
         row
@@ -393,6 +399,9 @@ def _build_execution_preflight(
         ready_to_execute=(len(reasons) == 0),
         reasons=reasons,
         position_status=position.status.value,
+        contract_closed=contract_closed,
+        closes_at=getattr(position, "closes_at", position.created_at),
+        seconds_until_close=seconds_until_close,
         product_key_match=product_key_match,
         required_ngh=required_ngh,
         deposited_ngh=deposited_ngh,
@@ -636,6 +645,27 @@ def _execute_demo_pipeline(
                 ),
             )
 
+    execution_price_terms: List[tuple[float, int]] = []
+    for provider_id, gpu_count in matched_provider_gpus.items():
+        for row in listings:
+            if row.provider_id != provider_id:
+                continue
+            execution_price_terms.append((float(row.indicative_price_per_ngh), int(gpu_count)))
+            break
+    total_price_weight = sum(weight for _, weight in execution_price_terms)
+    execution_market_price_per_ngh: Optional[float]
+    if total_price_weight > 0:
+        execution_market_price_per_ngh = (
+            sum(price * weight for price, weight in execution_price_terms) / total_price_weight
+        )
+    else:
+        execution_market_price_per_ngh = None
+    execution_market_notional = (
+        float(deposit_amount) * execution_market_price_per_ngh
+        if execution_market_price_per_ngh is not None
+        else None
+    )
+
     _notify_demo_step(step_hook, "execute_compute", "running", "Calling remote GPU backend")
     provider_executions: List[DemoProviderExecutionResponse] = []
     for provider_id, gpu_count in matched_provider_gpus.items():
@@ -748,6 +778,8 @@ def _execute_demo_pipeline(
         futures_contract_notional=float(position.notional),
         futures_price_per_ngh=float(position.price_per_ngh),
         futures_quantity_ngh=float(position.quantity_ngh),
+        execution_market_price_per_ngh=execution_market_price_per_ngh,
+        execution_market_notional=execution_market_notional,
         consolidated_prime_factors=_consolidate_prime_factors(provider_executions),
         futures_product_key=position.product_key.model_dump(mode="json"),
     )
@@ -814,6 +846,7 @@ def _full_demo_worker(run_id: str, owner_id: Optional[str], body: FullDemoRunReq
                 side=PositionSide.BUY,
                 quantity_ngh=body.quantity_ngh,
                 price_per_ngh=body.price_per_ngh,
+                close_in_seconds=0,
             ),
             owner_id=owner_id,
         )
@@ -879,6 +912,18 @@ def create_position(
 @router.post("/market/positions/{position_id}/settle", response_model=MarketPositionResponse)
 def settle_position(position_id: str):
     """Settle a position into the holder's voucher balance."""
+    existing = storage.get_market_position(position_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Position with id '{position_id}' not found",
+        )
+    seconds_until_close = seconds_until_contract_close(existing)
+    if seconds_until_close > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"contract_not_closed_yet:{seconds_until_close}s_remaining",
+        )
     position = storage.settle_market_position(position_id)
     if not position:
         raise HTTPException(
@@ -907,8 +952,14 @@ def get_strategy_metrics(user=Depends(get_current_user_optional)):
 
 
 @router.get("/market/live/overview", response_model=MarketLiveOverviewResponse)
-def get_live_overview():
-    return storage.list_live_market_overview()
+def get_live_overview(
+    group_by: str = Query(
+        "gpu_model",
+        description="gpu_model: one row per GPU (merged). product_key: one row per traded product key.",
+        pattern="^(gpu_model|product_key)$",
+    ),
+):
+    return storage.list_live_market_overview(group_by=group_by)
 
 
 @router.get("/market/live/orderbook", response_model=ExchangeOrderBookResponse)

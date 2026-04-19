@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 
@@ -56,10 +58,11 @@ def setup_instructions_hint() -> str:
         return custom
     host = factoring_ssh_host_label()
     return (
-        "Local dev (no GPU): from apps/api run "
-        "`.venv/bin/python -m uvicorn dev_remote_factor_server:app --host 127.0.0.1 --port 8000` "
-        "with FACTORING_REMOTE_HTTP_URL=http://127.0.0.1:8000 in apps/api/.env, "
-        "or start the full stack with COREINDEX_DEV_FACTOR_STUB=1. "
+        "Local dev: `npm run dev` starts the in-repo factor stub on port 8000 by default "
+        "(set COREINDEX_DEV_FACTOR_STUB=0 if you use an SSH tunnel on that port). "
+        "Running only uvicorn from apps/api auto-starts the same stub when "
+        "FACTORING_REMOTE_HTTP_URL is http://127.0.0.1 or http://localhost and nothing is listening. "
+        "Manual stub: `.venv/bin/python -m uvicorn dev_remote_factor_server:app --host 127.0.0.1 --port 8000`. "
         "Production: on the GPU server run "
         "`uvicorn remote_factor_server:app --host 0.0.0.0 --port 8000`, then from your laptop "
         f"`ssh -N -L 8000:127.0.0.1:8000 you@{host}` "
@@ -68,6 +71,44 @@ def setup_instructions_hint() -> str:
         "If HTTP_PROXY is set, CoreIndex disables proxying for the factor URL; you can also set "
         "NO_PROXY=127.0.0.1,localhost."
     )
+
+
+def probe_factor_http_identity() -> Tuple[Optional[str], Optional[int]]:
+    """If TCP is already OK, GET the factor base URL root JSON (dev stub exposes service + limits).
+
+    Returns ``(kind, dev_stub_max_digits)`` where ``kind`` is e.g. ``dev_remote_factor_server`` or ``None``.
+    """
+    try:
+        import requests
+    except Exception:
+        return None, None
+
+    url = factoring_base_url().rstrip("/") + "/"
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(url, timeout=(2.0, 2.0))
+    except requests.RequestException as exc:
+        logging.getLogger("uvicorn.error").debug("factor HTTP identity probe failed: %s", exc)
+        return None, None
+
+    if response.status_code != 200:
+        return None, None
+    try:
+        payload = response.json()
+    except Exception:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    service = payload.get("service")
+    if service == "dev_remote_factor_server":
+        try:
+            import dev_remote_factor_server as dev_stub
+
+            return "dev_remote_factor_server", int(dev_stub._MAX_TRIAL_DIGITS)
+        except Exception:
+            return "dev_remote_factor_server", None
+    return None, None
 
 
 def probe_gpu_backend_tcp() -> tuple[bool, str | None]:

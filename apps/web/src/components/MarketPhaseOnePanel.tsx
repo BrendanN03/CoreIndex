@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from './ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import {
   JobApi,
   MarketApi,
@@ -25,7 +26,6 @@ import {
   type GpuBackendStatusDto,
   type JobReceiptsResponseDto,
   type MarketPositionResponseDto,
-  type ProductKeyDto,
   type QcAdversarialMatrixResponseDto,
   type QcAdversarialSuiteResponseDto,
   type QcGoldCorpusCaseDto,
@@ -40,6 +40,7 @@ import {
   type SettlementRunResponseDto,
   type VoucherBalanceResponseDto,
   type WindowDto,
+  type ProductKeyDto,
 } from '../lib/api';
 
 type Region = WindowDto['region'];
@@ -108,6 +109,10 @@ function FactoringSummaryReceipt({
   label: string;
   summary: Record<string, unknown>;
 }) {
+  const sanitizedSummary = { ...summary };
+  // Hide backend-specific operational notes from receipt surfaces.
+  delete sanitizedSummary.note;
+
   const method = strVal(summary.method);
   const inputN = strVal(summary.input_n);
   const factors = summary.final_prime_factors;
@@ -168,7 +173,7 @@ function FactoringSummaryReceipt({
           Full CADO-NFS / ECM JSON (exact server payload)
         </summary>
         <pre className="mt-2 max-h-52 overflow-auto rounded border border-slate-800 bg-slate-950 p-2 text-[10px] leading-relaxed text-slate-400 whitespace-pre-wrap break-all">
-          {JSON.stringify(summary, null, 2)}
+          {JSON.stringify(sanitizedSummary, null, 2)}
         </pre>
       </details>
     </div>
@@ -183,6 +188,54 @@ function formatHorizonLabel(totalSeconds: number): string {
   if (h > 0) return `${h}h ${m}m (${sec}s)`;
   if (m > 0) return `${m}m ${s}s (${sec}s)`;
   return `${sec}s`;
+}
+
+/** Align with API `COREINDEX_LEGACY_MISSING_CLOSES_AT_SECONDS` default (300s). */
+const LEGACY_CLOSE_FALLBACK_MS = 300_000;
+
+function parseIsoToMs(iso?: string | null): number | null {
+  if (!iso) return null;
+  let trimmed = iso.trim();
+  if (!trimmed.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(trimmed)) {
+    trimmed = `${trimmed}Z`;
+  }
+  // Some engines choke on >3 fractional second digits; normalize to milliseconds.
+  trimmed = trimmed.replace(/(\.\d{3})\d+(?=Z|[+-])/g, '$1');
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function productKeysEqual(a: ProductKeyDto, b: ProductKeyDto): boolean {
+  return a.region === b.region && a.iso_hour === b.iso_hour && a.sla === b.sla && a.tier === b.tier;
+}
+
+/** Milliseconds until this contract may settle / escrow; 0 means closed. Mirrors API `seconds_until_contract_close`. */
+function positionMsUntilClose(p: MarketPositionResponseDto, nowMs: number): number {
+  const explicitClose = parseIsoToMs(p.closes_at);
+  if (explicitClose != null) return Math.max(0, explicitClose - nowMs);
+  const horizonSec =
+    typeof p.close_in_seconds === 'number' &&
+    Number.isFinite(p.close_in_seconds) &&
+    p.close_in_seconds >= 0
+      ? Math.floor(p.close_in_seconds)
+      : LEGACY_CLOSE_FALLBACK_MS / 1000;
+  const created = parseIsoToMs(p.created_at);
+  // Unparseable created_at: fail closed (same order of magnitude as API `10**9` seconds).
+  if (created == null) return 1_000_000_000_000;
+  return Math.max(0, created + horizonSec * 1000 - nowMs);
+}
+
+/** Prefer API `seconds_until_close`; fallback to client-side clock math. */
+function positionSecondsUntilClose(p: MarketPositionResponseDto, nowMs: number): number {
+  const raw = p.seconds_until_close;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return Math.max(0, Math.floor(raw));
+  }
+  return Math.max(0, Math.ceil(positionMsUntilClose(p, nowMs) / 1000));
+}
+
+function positionContractClosed(p: MarketPositionResponseDto, nowMs: number): boolean {
+  return positionSecondsUntilClose(p, nowMs) <= 0;
 }
 
 function parseJsonlRows(input: string): Record<string, unknown>[] {
@@ -398,6 +451,13 @@ function ExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
             {(run.futures_contract_notional ?? run.futures_quantity_ngh * run.futures_price_per_ngh).toFixed(4)}
           </div>
         ) : null}
+        {run.execution_market_price_per_ngh != null ? (
+          <div>
+            <span className="text-slate-500">Execution clearing price: </span>
+            ${run.execution_market_price_per_ngh.toFixed(4)}/NGH · execution notional $
+            {(run.execution_market_notional ?? run.execution_market_price_per_ngh * run.delivered_ngh).toFixed(4)}
+          </div>
+        ) : null}
         <div>
           <span className="text-slate-500">Integer factored (N): </span>
           <span className="font-mono text-cyan-200/90">{run.composite_to_factor ?? '—'}</span>
@@ -522,6 +582,13 @@ function ExecutionReceiptCard({ run }: { run: DemoRunResponseDto }) {
   );
 }
 
+function firstProviderFactoringSummary(run: DemoRunResponseDto | null): Record<string, unknown> | null {
+  if (!run) return null;
+  const first = run.provider_executions?.[0];
+  if (!first || typeof first.factoring_summary !== 'object' || first.factoring_summary == null) return null;
+  return first.factoring_summary;
+}
+
 /** Match `market_simulator` GPU templates so synthetic nominations cover this window. */
 function productWindowForGpuModel(gpu: string): Pick<WindowDto, 'region' | 'sla' | 'tier'> {
   if (gpu === 'RTX 3090') return { region: 'us-west', sla: 'standard', tier: 'basic' };
@@ -550,6 +617,7 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
   /** Futures settlement / receipt horizon (sent as `target_settle_seconds`). */
   const [contractHorizonAmount, setContractHorizonAmount] = useState<number>(1);
   const [contractHorizonUnit, setContractHorizonUnit] = useState<HorizonUnit>('minutes');
+  const [positionClockNowMs, setPositionClockNowMs] = useState<number>(() => Date.now());
   const [preflightByPosition, setPreflightByPosition] = useState<
     Record<string, ExecutionPreflightResponseDto>
   >({});
@@ -625,6 +693,19 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
   const [p2CaseId, setP2CaseId] = useState<string>(P2_CORPUS[0].id);
   const [p2CorpusResults, setP2CorpusResults] = useState<P2CorpusResult[]>([]);
   const latestReceipt = jobReceipts?.receipts[0] ?? null;
+  const latestRunFactoringSummary = firstProviderFactoringSummary(lastDemoRun);
+  const latestReceiptProviderSummaries = useMemo(() => {
+    const payload = latestReceipt?.payload as Record<string, unknown> | undefined;
+    const execs = payload?.provider_executions;
+    if (!Array.isArray(execs)) return [] as Record<string, unknown>[];
+    return execs
+      .map((row) => {
+        if (!row || typeof row !== 'object') return null;
+        const summary = (row as { factoring_summary?: unknown }).factoring_summary;
+        return summary && typeof summary === 'object' ? (summary as Record<string, unknown>) : null;
+      })
+      .filter((row): row is Record<string, unknown> => row != null);
+  }, [latestReceipt]);
   const p2GoldCriteriaPass = useMemo(() => {
     if (!p2GoldReport) return null;
     return (
@@ -665,7 +746,6 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
   }, [p2AdversarialReady, p2GoldCriteriaPass, p2MatrixReady]);
 
   useEffect(() => {
-    setPricePerNgh(gpuBasePrices[selectedGPU] ?? 2.45);
     const w = productWindowForGpuModel(selectedGPU);
     setRegion(w.region);
     setSla(w.sla);
@@ -683,10 +763,55 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
     [region, isoHour, sla, tier],
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    async function syncMarketPrice() {
+      try {
+        const pk = productKey;
+        const [book, tape] = await Promise.all([
+          MarketApi.getLiveOrderBook({ ...pk, gpu_model: selectedGPU }),
+          MarketApi.getLiveTape({ ...pk, gpu_model: selectedGPU, limit: 60 }),
+        ]);
+        let px: number | null = null;
+        if (tape.length) px = tape[0].price_per_ngh;
+        else if (book.best_bid != null && book.best_ask != null) px = (book.best_bid + book.best_ask) / 2;
+        else if (book.best_bid != null) px = book.best_bid;
+        else if (book.best_ask != null) px = book.best_ask;
+        if (!cancelled && px != null && px > 0) {
+          setPricePerNgh(Number(px.toFixed(4)));
+        }
+      } catch {
+        /* keep last price */
+      }
+    }
+    void syncMarketPrice();
+    const id = globalThis.setInterval(() => void syncMarketPrice(), 5000);
+    return () => {
+      cancelled = true;
+      globalThis.clearInterval(id);
+    };
+  }, [productKey, selectedGPU]);
+
   const contractHorizonSeconds = useMemo(
     () => horizonToSeconds(contractHorizonAmount, contractHorizonUnit),
     [contractHorizonAmount, contractHorizonUnit],
   );
+  const contractHorizonSecondsRef = useRef(contractHorizonSeconds);
+  contractHorizonSecondsRef.current = contractHorizonSeconds;
+
+  const defaultCompositeDigitCount = useMemo(() => {
+    const t = deliveryComposite.trim();
+    if (!/^\d+$/.test(t)) return 0;
+    return t.length;
+  }, [deliveryComposite]);
+
+  function compositeExceedsDevStub(composite: string): boolean {
+    const max = gpuBackend?.dev_stub_max_composite_digits;
+    if (gpuBackend?.factor_backend_kind !== 'dev_remote_factor_server' || max == null) return false;
+    const t = composite.trim();
+    if (!/^\d+$/.test(t)) return false;
+    return t.length > max;
+  }
 
   function applyProductKeyForDeposit(pk: ProductKeyDto) {
     setRegion(pk.region);
@@ -709,6 +834,11 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
     void refresh().catch((err) => {
       setError(err instanceof Error ? err.message : String(err));
     });
+  }, []);
+
+  useEffect(() => {
+    const t = globalThis.setInterval(() => setPositionClockNowMs(Date.now()), 1000);
+    return () => globalThis.clearInterval(t);
   }, []);
 
   async function loadGpuBackend() {
@@ -753,6 +883,11 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
     try {
       await action();
       await refresh();
+      if (jobId.trim()) {
+        await refreshP1State(jobId.trim()).catch(() => {
+          // Keep UX responsive when receipts/session fetch is temporarily unavailable.
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -999,6 +1134,20 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             {!validComposite(deliveryComposite) ? (
               <div className="text-[11px] text-amber-200/90">Enter at least two digits (no spaces or letters).</div>
             ) : null}
+            {validComposite(deliveryComposite) && defaultCompositeDigitCount > 0 ? (
+              <div className="text-[11px] text-slate-400">
+                {defaultCompositeDigitCount} digit{defaultCompositeDigitCount === 1 ? '' : 's'} —{' '}
+                {gpuBackend?.dev_stub_max_composite_digits != null &&
+                defaultCompositeDigitCount > gpuBackend.dev_stub_max_composite_digits ? (
+                  <span className="text-amber-200/95">
+                    exceeds configured backend limit ({gpuBackend.dev_stub_max_composite_digits} digits); shorten the
+                    composite or raise DEV_STUB_MAX_COMPOSITE_DIGITS on the factor service.
+                  </span>
+                ) : (
+                  <span>within the configured backend digit limit.</span>
+                )}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -1100,11 +1249,16 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             disabled={isBusy}
             onClick={() =>
               void run(async () => {
+                const horizonSec = Math.min(
+                  MAX_TARGET_SETTLE_SECONDS,
+                  Math.max(0, Math.floor(Number(contractHorizonSecondsRef.current))),
+                );
                 const position = await MarketApi.createPosition({
                   product_key: productKey,
                   side: 'buy',
                   quantity_ngh: quantityNgh,
                   price_per_ngh: pricePerNgh,
+                  close_in_seconds: horizonSec > 0 ? horizonSec : 30,
                 });
                 setStatus(`Created position ${position.position_id}`);
               })
@@ -1128,135 +1282,170 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
           <div className="mt-3 max-h-[min(22rem,45vh)] overflow-y-auto overscroll-contain space-y-3 pr-1">
             {positions.length ? (
               positions.map((position) => (
-                <div
-                  key={position.position_id}
-                  className="rounded-lg border border-slate-800 bg-slate-950/40 p-4"
-                >
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="space-y-1">
-                      <div className="text-sm text-slate-100">{formatProductKey(position.product_key)}</div>
-                      <div className="text-xs text-slate-400">
-                        {position.side} · {position.quantity_ngh} NGH · ${position.price_per_ngh.toFixed(2)} / NGH
-                      </div>
-                      <div className="text-xs text-slate-500">{position.position_id}</div>
-                    </div>
+                (() => {
+                  const secondsUntilClose = positionSecondsUntilClose(
+                    position,
+                    positionClockNowMs,
+                  );
+                  const contractClosed = positionContractClosed(position, positionClockNowMs);
+                  const preflight = preflightByPosition[position.position_id];
+                  return (
+                    <div
+                      key={position.position_id}
+                      className="rounded-lg border border-slate-800 bg-slate-950/40 p-4"
+                    >
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="space-y-1">
+                          <div className="text-sm text-slate-100">{formatProductKey(position.product_key)}</div>
+                          <div className="text-xs text-slate-400">
+                            {position.side} · {position.quantity_ngh} NGH · ${position.price_per_ngh.toFixed(2)} / NGH
+                          </div>
+                          <div className="text-xs text-slate-500">{position.position_id}</div>
+                          {typeof position.close_in_seconds === 'number' ? (
+                            <div className="text-[11px] text-slate-500">
+                              Requested close window: {position.close_in_seconds.toLocaleString()}s
+                            </div>
+                          ) : null}
+                          <div className="text-[11px] text-slate-400">
+                            Horizon close:{' '}
+                            {contractClosed ? (
+                              <span className="text-emerald-300">closed</span>
+                            ) : (
+                              <span className="text-amber-300">{secondsUntilClose}s remaining</span>
+                            )}
+                          </div>
+                            {!contractClosed ? (
+                              <div className="text-[11px] text-amber-200/90">
+                                Trading-only window: settlement, preflight, execution, and voucher escrow stay locked
+                                until close.
+                              </div>
+                            ) : null}
+                        </div>
 
-                    <div className="flex flex-col gap-3 lg:flex-1 lg:min-w-0">
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                          Number to factor (this contract)
-                        </div>
-                        <Input
-                          value={compositeByPosition[position.position_id] ?? ''}
-                          onChange={(e) =>
-                            setCompositeByPosition((prev) => ({
-                              ...prev,
-                              [position.position_id]: e.target.value,
-                            }))
-                          }
-                          placeholder={deliveryComposite || 'e.g. 143'}
-                          className="bg-slate-800 border-slate-700 font-mono text-xs h-8"
-                          aria-label={`Composite to factor for position ${position.position_id}`}
-                        />
-                        <div className="text-[10px] text-slate-500">
-                          Leave blank to use the default under &quot;Deposit vouchers&quot; (
-                          {validComposite(deliveryComposite) ? deliveryComposite : 'set a valid default'}).
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <Badge
-                          variant="outline"
-                          className={
-                            position.status === 'settled'
-                              ? 'border-emerald-800 text-emerald-300'
-                              : 'border-amber-800 text-amber-300'
-                          }
-                        >
-                          {position.status}
-                        </Badge>
-                        <Button
-                          size="sm"
-                          className="bg-emerald-600 hover:bg-emerald-700"
-                          disabled={isBusy || position.status === 'settled'}
-                          onClick={() =>
-                            void run(async () => {
-                              const settled = await MarketApi.settlePosition(position.position_id);
-                              setStatus(`Settled position ${settled.position_id} into vouchers`);
-                            })
-                          }
-                        >
-                          Settle to Vouchers
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="bg-cyan-600 hover:bg-cyan-700"
-                          disabled={
-                            isBusy ||
-                            !jobId.trim() ||
-                            !validComposite(compositeForPosition(position.position_id))
-                          }
-                          onClick={() =>
-                            void run(async () => {
-                              await loadExecutionPreflight(position.position_id, jobId);
-                              const result = await MarketApi.executeContract(position.position_id, {
-                                job_id: jobId.trim(),
-                                composite: compositeForPosition(position.position_id),
-                                target_settle_seconds: contractHorizonSeconds,
-                                auto_settle_if_open: false,
-                              });
-                              setLastDemoRun(result);
-                              setStatus(
-                                `Execution complete · tx ${result.blockchain_anchor.tx_hash.slice(0, 12)}... · verification ${result.verification_passed ? 'passed' : 'failed'}`,
-                              );
-                            })
-                          }
-                        >
-                          Execute Contract (CADO-NFS)
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="border-slate-700 bg-slate-900"
-                          disabled={isBusy || !jobId.trim()}
-                          onClick={() =>
-                            void run(async () => {
-                              const report = await loadExecutionPreflight(position.position_id, jobId);
-                              setStatus(
-                                report.ready_to_execute
-                                  ? `Preflight passed · ${report.matching_provider_count} providers · ${report.total_available_gpus} GPUs visible`
-                                  : `Preflight failed · ${report.reasons.join(' | ')}`,
-                              );
-                            })
-                          }
-                        >
-                          Run Preflight
-                        </Button>
-                      </div>
-                      {preflightByPosition[position.position_id] ? (
-                        <div className="rounded border border-slate-800/80 bg-slate-950/40 p-2 text-[11px]">
-                          {(() => {
-                            const report = preflightByPosition[position.position_id];
-                            return (
+                        <div className="flex flex-col gap-3 lg:flex-1 lg:min-w-0">
+                          <div className="space-y-1">
+                            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                              Number to factor (this contract)
+                            </div>
+                            <Input
+                              value={compositeByPosition[position.position_id] ?? ''}
+                              onChange={(e) =>
+                                setCompositeByPosition((prev) => ({
+                                  ...prev,
+                                  [position.position_id]: e.target.value,
+                                }))
+                              }
+                              placeholder={deliveryComposite || 'e.g. 143'}
+                              className="bg-slate-800 border-slate-700 font-mono text-xs h-8"
+                              aria-label={`Composite to factor for position ${position.position_id}`}
+                            />
+                            <div className="text-[10px] text-slate-500">
+                              Leave blank to use the default under &quot;Deposit vouchers&quot; (
+                              {validComposite(deliveryComposite) ? deliveryComposite : 'set a valid default'}).
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3">
+                            <Badge
+                              variant="outline"
+                              className={
+                                position.status === 'settled'
+                                  ? 'border-emerald-800 text-emerald-300'
+                                  : 'border-amber-800 text-amber-300'
+                              }
+                            >
+                              {position.status}
+                            </Badge>
+                            <Button
+                              size="sm"
+                              className="bg-emerald-600 hover:bg-emerald-700"
+                              title={!contractClosed ? 'Can settle only after the futures close horizon.' : undefined}
+                              disabled={isBusy || position.status === 'settled' || !contractClosed}
+                              onClick={() =>
+                                void run(async () => {
+                                  const settled = await MarketApi.settlePosition(position.position_id);
+                                  setStatus(`Settled position ${settled.position_id} into vouchers`);
+                                })
+                              }
+                            >
+                              Settle to Vouchers
+                            </Button>
+                            <Button
+                              size="sm"
+                              className="bg-cyan-600 hover:bg-cyan-700"
+                              title={
+                                !contractClosed
+                                  ? `Contract has not closed yet (${secondsUntilClose}s remaining).`
+                                  : compositeExceedsDevStub(compositeForPosition(position.position_id))
+                                    ? `Composite exceeds dev stub max (${gpuBackend?.dev_stub_max_composite_digits ?? '?'} digits). Use CADO backend or a shorter N.`
+                                    : undefined
+                              }
+                              disabled={
+                                isBusy ||
+                                !jobId.trim() ||
+                                !contractClosed ||
+                                !validComposite(compositeForPosition(position.position_id)) ||
+                                compositeExceedsDevStub(compositeForPosition(position.position_id))
+                              }
+                              onClick={() =>
+                                void run(async () => {
+                                  await loadExecutionPreflight(position.position_id, jobId);
+                                  const result = await MarketApi.executeContract(position.position_id, {
+                                    job_id: jobId.trim(),
+                                    composite: compositeForPosition(position.position_id),
+                                    target_settle_seconds: contractHorizonSeconds,
+                                    auto_settle_if_open: false,
+                                  });
+                                  setLastDemoRun(result);
+                                  setStatus(
+                                    `Execution complete · tx ${result.blockchain_anchor.tx_hash.slice(0, 12)}... · verification ${result.verification_passed ? 'passed' : 'failed'}`,
+                                  );
+                                })
+                              }
+                            >
+                              Execute Contract (CADO-NFS)
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-slate-700 bg-slate-900"
+                              title={!contractClosed ? 'Preflight is available only after close horizon.' : undefined}
+                              disabled={isBusy || !jobId.trim() || !contractClosed}
+                              onClick={() =>
+                                void run(async () => {
+                                  const report = await loadExecutionPreflight(position.position_id, jobId);
+                                  setStatus(
+                                    report.ready_to_execute
+                                      ? `Preflight passed · ${report.matching_provider_count} providers · ${report.total_available_gpus} GPUs visible`
+                                      : `Preflight failed · ${report.reasons.join(' | ')}`,
+                                  );
+                                })
+                              }
+                            >
+                              Run Preflight
+                            </Button>
+                          </div>
+                          {preflight ? (
+                            <div className="rounded border border-slate-800/80 bg-slate-950/40 p-2 text-[11px]">
                               <div className="space-y-1 text-slate-400">
                                 <div>
                                   <span className="text-slate-500">Preflight: </span>
-                                  <span className={report.ready_to_execute ? 'text-emerald-300' : 'text-amber-300'}>
-                                    {report.ready_to_execute ? 'ready' : 'blocked'}
+                                  <span className={preflight.ready_to_execute ? 'text-emerald-300' : 'text-amber-300'}>
+                                    {preflight.ready_to_execute ? 'ready' : 'blocked'}
                                   </span>
                                   <span className="text-slate-500"> · Escrowed </span>
-                                  {report.deposited_ngh.toFixed(2)} / required {report.required_ngh.toFixed(2)} NGH
+                                  {preflight.deposited_ngh.toFixed(2)} / required {preflight.required_ngh.toFixed(2)} NGH
                                 </div>
-                                {!report.ready_to_execute ? (
-                                  <div className="text-amber-200/90">{report.reasons.join(' | ')}</div>
+                                {!preflight.ready_to_execute ? (
+                                  <div className="text-amber-200/90">{preflight.reasons.join(' | ')}</div>
                                 ) : null}
                               </div>
-                            );
-                          })()}
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  );
+                })()
               ))
             ) : (
               <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
@@ -1267,7 +1456,47 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
         </div>
       </Card>
 
-      <div className="space-y-6">
+      <div className="space-y-4">
+        <div className="rounded-lg border border-slate-700/80 bg-slate-950/60 p-4 text-xs text-slate-300 space-y-2">
+          <div className="text-sm font-medium text-slate-100">How to use this column</div>
+          <ol className="list-decimal list-inside space-y-1.5 text-slate-400 leading-relaxed">
+            <li>
+              <span className="text-slate-200">Wallet &amp; job</span> — align the job with the same product key as
+              your contract, deposit escrow from the matching voucher wallet.
+            </li>
+            <li>
+              <span className="text-slate-200">Commodity matching</span> — sellers are market-assigned at execution;
+              buyers never pin a specific listing.
+            </li>
+            <li>
+              <span className="text-slate-200">Execute</span> lives on the left under each open position (after
+              deposit).
+            </li>
+            <li>
+              <span className="text-slate-200">Settlement</span> — optional collective session, QC shortcuts, anchor /
+              pay / on-chain verify (demo chain).
+            </li>
+            <li>
+              <span className="text-slate-200">P2 QC lab</span> — separate canonicalization benchmarks; not required for
+              delivery execution.
+            </li>
+          </ol>
+        </div>
+
+        <Tabs defaultValue="wallet" className="w-full">
+          <TabsList className="grid h-auto w-full grid-cols-3 gap-1 border border-slate-800 bg-slate-900 p-1">
+            <TabsTrigger value="wallet" className="px-1 py-2 text-[11px] leading-tight">
+              Wallet &amp; job
+            </TabsTrigger>
+            <TabsTrigger value="settlement" className="px-1 py-2 text-[11px] leading-tight">
+              Settlement
+            </TabsTrigger>
+            <TabsTrigger value="p2" className="px-1 py-2 text-[11px] leading-tight">
+              P2 QC lab
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="wallet" className="mt-4 space-y-6">
         <Card className="bg-slate-900 border-slate-800 p-6">
           <div className="text-slate-100">Voucher balances</div>
           <div className="mt-3 h-72 overflow-y-scroll overscroll-contain space-y-3 pr-2">
@@ -1355,7 +1584,24 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             </Button>
             <Button
               className="w-full bg-violet-600 hover:bg-violet-700"
-              disabled={isBusy || !jobId.trim()}
+              title={
+                positions.some((p) => {
+                  if (p.status === 'settled') return false;
+                  if (!productKeysEqual(p.product_key, productKey)) return false;
+                  return !positionContractClosed(p, positionClockNowMs);
+                })
+                  ? 'Cannot escrow vouchers while any open futures contract for this product key is still inside its close window (including legacy rows without closes_at).'
+                  : undefined
+              }
+              disabled={
+                isBusy ||
+                !jobId.trim() ||
+                positions.some((p) => {
+                  if (p.status === 'settled') return false;
+                  if (!productKeysEqual(p.product_key, productKey)) return false;
+                  return !positionContractClosed(p, positionClockNowMs);
+                })
+              }
               onClick={() =>
                 void run(async () => {
                   const deposit = await VoucherApi.deposit({
@@ -1384,34 +1630,49 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             </div>
           </div>
         </Card>
+          </TabsContent>
 
+          <TabsContent value="settlement" className="mt-4 space-y-6">
         <Card className="bg-slate-900 border-slate-800 p-6">
           <div className="text-slate-100">P1 Operations: Sessions, QC, Settlement</div>
           <p className="mt-2 text-xs text-slate-400">
-            Run collective session lifecycle, post QC outcomes, and complete settlement against the current job.
+            Optional post-execution steps tied to the <span className="text-slate-200">Job ID</span> from the Wallet
+            tab. Nothing here blocks CADO execution — use it when you want session records, QC attestations, or a
+            settlement anchor on the demo chain.
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-3">
               <div className="text-sm text-slate-200">Collective session</div>
-              <Input
-                value={sessionId}
-                onChange={(e) => setSessionId(e.target.value)}
-                placeholder={jobId.trim() ? `sess-${jobId.trim()}` : 'sess-job-123'}
-                className="bg-slate-800 border-slate-700"
-              />
-              <Input
-                value={sessionMembershipCsv}
-                onChange={(e) => setSessionMembershipCsv(e.target.value)}
-                placeholder="member-a,member-b"
-                className="bg-slate-800 border-slate-700"
-              />
-              <Input
-                type="number"
-                min={1}
-                value={sessionWorldSize}
-                onChange={(e) => setSessionWorldSize(Math.max(1, Number(e.target.value) || 1))}
-                className="bg-slate-800 border-slate-700"
-              />
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                Session ID
+                <Input
+                  value={sessionId}
+                  onChange={(e) => setSessionId(e.target.value)}
+                  placeholder={jobId.trim() ? `sess-${jobId.trim()}` : 'sess-job-123'}
+                  className="bg-slate-800 border-slate-700"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                Members (comma-separated)
+                <Input
+                  value={sessionMembershipCsv}
+                  onChange={(e) => setSessionMembershipCsv(e.target.value)}
+                  placeholder="member-a,member-b"
+                  className="bg-slate-800 border-slate-700"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                World size (≥ number of members)
+                <Input
+                  type="number"
+                  min={1}
+                  value={sessionWorldSize}
+                  onChange={(e) => setSessionWorldSize(Math.max(1, Number(e.target.value) || 1))}
+                  className="bg-slate-800 border-slate-700"
+                />
+              </label>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Button
                   size="sm"
@@ -1456,12 +1717,16 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
                 </Button>
               </div>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
-                <Input
-                  value={sessionReadyMember}
-                  onChange={(e) => setSessionReadyMember(e.target.value)}
-                  placeholder="member-a"
-                  className="bg-slate-800 border-slate-700"
-                />
+                <label className="min-w-0 space-y-1 text-[11px] text-slate-400 sm:col-span-1">
+                  Member to mark ready
+                  <Input
+                    value={sessionReadyMember}
+                    onChange={(e) => setSessionReadyMember(e.target.value)}
+                    placeholder="member-a"
+                    className="bg-slate-800 border-slate-700"
+                    autoComplete="off"
+                  />
+                </label>
                 <Button
                   size="sm"
                   className="bg-emerald-700 hover:bg-emerald-800"
@@ -1515,18 +1780,31 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
 
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-3">
               <div className="text-sm text-slate-200">QC + settlement</div>
-              <Input
-                value={qcPackageId}
-                onChange={(e) => setQcPackageId(e.target.value)}
-                placeholder="package id"
-                className="bg-slate-800 border-slate-700"
-              />
-              <Input
-                value={qcProviderId}
-                onChange={(e) => setQcProviderId(e.target.value)}
-                placeholder="provider id"
-                className="bg-slate-800 border-slate-700"
-              />
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Package ID usually matches a job package (see job detail). Receipt / QC roots default to demo hex —
+                click <span className="text-slate-300">Use latest receipt hash</span> after execution to align with
+                the last delivery receipt.
+              </p>
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                Package ID
+                <Input
+                  value={qcPackageId}
+                  onChange={(e) => setQcPackageId(e.target.value)}
+                  placeholder="pkg-…"
+                  className="bg-slate-800 border-slate-700"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                Provider ID (optional)
+                <Input
+                  value={qcProviderId}
+                  onChange={(e) => setQcProviderId(e.target.value)}
+                  placeholder="provider-1"
+                  className="bg-slate-800 border-slate-700"
+                  autoComplete="off"
+                />
+              </label>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Button
                   size="sm"
@@ -1569,18 +1847,26 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
                   QC spot
                 </Button>
               </div>
-              <Input
-                value={receiptRoot}
-                onChange={(e) => setReceiptRoot(e.target.value)}
-                placeholder="receipt root"
-                className="bg-slate-800 border-slate-700 font-mono"
-              />
-              <Input
-                value={qcRoot}
-                onChange={(e) => setQcRoot(e.target.value)}
-                placeholder="qc root"
-                className="bg-slate-800 border-slate-700 font-mono"
-              />
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                Receipt Merkle root (hex)
+                <Input
+                  value={receiptRoot}
+                  onChange={(e) => setReceiptRoot(e.target.value)}
+                  placeholder="0x…"
+                  className="bg-slate-800 border-slate-700 font-mono"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-slate-400">
+                QC Merkle root (hex)
+                <Input
+                  value={qcRoot}
+                  onChange={(e) => setQcRoot(e.target.value)}
+                  placeholder="0x…"
+                  className="bg-slate-800 border-slate-700 font-mono"
+                  autoComplete="off"
+                />
+              </label>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Button
                   size="sm"
@@ -1762,7 +2048,9 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             )}
           </div>
         </Card>
+          </TabsContent>
 
+          <TabsContent value="p2" className="mt-4 space-y-6">
         <Card className="bg-slate-900 border-slate-800 p-6">
           <div className="text-slate-100">P2 Verification: Canonicalization & Equivalence</div>
           <p className="mt-2 text-xs text-slate-400">
@@ -1811,8 +2099,8 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
                     });
                     const adversarialOk =
                       (suite.metrics?.expectation_pass_rate ?? 0) >= 1 &&
-                      (suite.metrics?.false_accept_count ?? 1) === 0 &&
-                      (suite.metrics?.false_reject_count ?? 1) === 0;
+                      (suite.metrics?.false_accept_count ?? 0) === 0 &&
+                      (suite.metrics?.false_reject_count ?? 0) === 0;
                     const goldOk =
                       report.pass_rate >= p2PassCriteria.min_pass_rate &&
                       report.false_accept_rate <= p2PassCriteria.max_false_accept_rate &&
@@ -2399,12 +2687,110 @@ export function MarketPhaseOnePanel({ selectedGPU }: Props) {
             ) : null}
           </div>
         </Card>
+          </TabsContent>
+        </Tabs>
 
-        {(status || error) && (
+        {(status || error || gpuBackend || latestRunFactoringSummary || latestReceipt) && (
           <Card className="bg-slate-900 border-slate-800 p-6">
             <div className="text-slate-100">Funding activity</div>
             {status ? <div className="mt-3 text-sm text-emerald-300">{status}</div> : null}
             {error ? <div className="mt-3 text-sm text-red-200">{error}</div> : null}
+            <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <div className="rounded border border-slate-800/80 bg-slate-950/40 p-3 text-xs">
+                <div className="text-slate-200 mb-2">GPU backend connectivity</div>
+                {gpuBackend ? (
+                  <>
+                    <div className={gpuBackend.tcp_reachable ? 'text-emerald-300' : 'text-amber-300'}>
+                      {gpuBackend.tcp_reachable ? 'Reachable' : 'Not reachable'} ·{' '}
+                      <span className="font-mono">{gpuBackend.configured_base_url}</span>
+                    </div>
+                    <div className="mt-1 text-slate-400">
+                      API POST target: <span className="font-mono">{gpuBackend.factor_post_url}</span>
+                    </div>
+                    {gpuBackend.factor_backend_kind ? (
+                      <div className="mt-1 text-slate-400">
+                        Backend kind: <span className="font-mono">{gpuBackend.factor_backend_kind}</span>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="text-slate-400">Backend status not loaded yet.</div>
+                )}
+                {gpuBackendError ? <div className="mt-1 text-red-200">{gpuBackendError}</div> : null}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3 border-slate-700 bg-slate-900"
+                  disabled={gpuBackendBusy}
+                  onClick={() => void loadGpuBackend()}
+                >
+                  {gpuBackendBusy ? 'Checking…' : 'Recheck GPU backend'}
+                </Button>
+              </div>
+
+              <div className="rounded border border-slate-800/80 bg-slate-950/40 p-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-slate-200">Latest receipts for current job</div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700 bg-slate-900"
+                    disabled={isBusy || !jobId.trim()}
+                    onClick={() =>
+                      void run(async () => {
+                        await refreshP1State(jobId.trim());
+                        setStatus(`Loaded receipts for ${jobId.trim()}`);
+                      })
+                    }
+                  >
+                    Refresh receipts
+                  </Button>
+                </div>
+                {!jobId.trim() ? (
+                  <div className="mt-2 text-slate-500">Enter or create a Job ID to load receipts.</div>
+                ) : latestReceipt ? (
+                  <div className="mt-2 space-y-1 text-slate-300">
+                    <div>
+                      Event: <span className="font-mono text-slate-400">{latestReceipt.event_id.slice(0, 18)}...</span>
+                    </div>
+                    <div>
+                      Position: <span className="font-mono text-slate-400">{latestReceipt.position_id}</span>
+                    </div>
+                    <div>
+                      Delivered {latestReceipt.delivered_ngh.toFixed(2)} NGH · providers {latestReceipt.provider_count}
+                    </div>
+                    {latestReceipt.verification_hash ? (
+                      <div className="font-mono text-[11px] text-slate-500 break-all">
+                        verification {latestReceipt.verification_hash}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="mt-2 text-slate-500">No receipts yet for this job.</div>
+                )}
+              </div>
+            </div>
+
+            {latestRunFactoringSummary ? (
+              <div className="mt-4">
+                <FactoringSummaryReceipt
+                  label="Latest factoring output from executed contract"
+                  summary={latestRunFactoringSummary}
+                />
+              </div>
+            ) : null}
+
+            {latestReceiptProviderSummaries.length ? (
+              <div className="mt-4 space-y-3">
+                {latestReceiptProviderSummaries.map((summary, idx) => (
+                  <FactoringSummaryReceipt
+                    key={`receipt-summary-${idx}`}
+                    label={`Receipt factoring output #${idx + 1}`}
+                    summary={summary}
+                  />
+                ))}
+              </div>
+            ) : null}
           </Card>
         )}
         {lastDemoRun ? <ExecutionReceiptCard run={lastDemoRun} /> : null}

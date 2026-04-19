@@ -11,7 +11,7 @@ from collections import defaultdict
 import functools
 from itertools import islice
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import logging
@@ -95,7 +95,9 @@ from app.schemas.models import (
     TradingHierarchyResponse,
     MarketLiveOverviewResponse,
     MarketLiveOverviewRow,
+    JudgeChainBlock,
 )
+from app.services.judge_chain_ledger import build_chain_block_for_delivery, extract_related_ops
 from app.services.options_pricing import quote_option
 from app.services.risk import (
     MAX_MARGIN_LIMIT,
@@ -106,6 +108,16 @@ from app.services.risk import (
 
 # Cap persisted platform events so JSON snapshots stay small and writes stay fast (demo UI fans out many requests).
 _MAX_PERSISTED_EVENTS = 2500
+
+
+def _utc_iso_millis_z(dt: datetime) -> str:
+    """RFC3339-style UTC with exactly millisecond precision (reliable in JS Date across browsers)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    ms = dt.microsecond // 1000
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms:03d}Z"
 
 
 class JobStorage:
@@ -122,6 +134,8 @@ class JobStorage:
         self._nominations: Dict[str, NominationResponse] = {}
         self._lots: Dict[str, Lot] = {}
         self._events: List[PlatformEvent] = []
+        self._judge_chain_blocks: List[JudgeChainBlock] = []
+        self._judge_chain_job_cursors: Dict[str, int] = {}
         self._sessions: Dict[str, CollectiveSessionResponse] = {}
         self._settlement_runs: Dict[str, SettlementRunResponse] = {}
         self._option_contracts: Dict[str, OptionContractResponse] = {}
@@ -247,6 +261,14 @@ class JobStorage:
         self._events = [PlatformEvent.model_validate(item) for item in raw.get("events", [])]
         if len(self._events) > _MAX_PERSISTED_EVENTS:
             self._events = self._events[-_MAX_PERSISTED_EVENTS:]
+        self._judge_chain_blocks = [
+            JudgeChainBlock.model_validate(item) for item in raw.get("judge_chain_blocks", [])
+        ]
+        self._judge_chain_job_cursors = {
+            str(job_id): int(idx)
+            for job_id, idx in raw.get("judge_chain_job_cursors", {}).items()
+            if isinstance(idx, int) or (isinstance(idx, float) and idx >= 0)
+        }
 
     def _trim_events_unlocked(self) -> None:
         if len(self._events) > _MAX_PERSISTED_EVENTS:
@@ -278,6 +300,8 @@ class JobStorage:
             },
             "lots": dict(self._lots),
             "events": list(self._events),
+            "judge_chain_blocks": list(self._judge_chain_blocks),
+            "judge_chain_job_cursors": dict(self._judge_chain_job_cursors),
         }
 
     @staticmethod
@@ -289,7 +313,10 @@ class JobStorage:
             "voucher_deposits": {
                 jid: dict(deps) for jid, deps in refs["voucher_deposits"].items()
             },
-            "positions": {key: value.model_dump(mode="json") for key, value in refs["positions"].items()},
+            "positions": {
+                key: value.model_dump(mode="json", exclude={"seconds_until_close"})
+                for key, value in refs["positions"].items()
+            },
             "orders": {key: value.model_dump(mode="json") for key, value in refs["orders"].items()},
             "trades": [trade.model_dump(mode="json") for trade in refs["trades"]],
             "nominations": {
@@ -322,6 +349,13 @@ class JobStorage:
             },
             "lots": {key: value.model_dump(mode="json") for key, value in refs["lots"].items()},
             "events": [event.model_dump(mode="json") for event in refs["events"]],
+            "judge_chain_blocks": [
+                block.model_dump(mode="json") for block in refs["judge_chain_blocks"]
+            ],
+            "judge_chain_job_cursors": {
+                str(job_id): int(idx)
+                for job_id, idx in refs["judge_chain_job_cursors"].items()
+            },
         }
 
     def _build_persist_snapshot_unlocked(self) -> dict:
@@ -432,16 +466,78 @@ class JobStorage:
             return list(reversed(tail))
         return list(reversed(self._events))
 
+    def list_events_chronological(self, limit: Optional[int] = None) -> List[PlatformEvent]:
+        """Oldest-first tail of the event log (for audit / judge chain views)."""
+        if limit is not None and limit > 0:
+            tail = self._events[-limit:]
+            return list(tail)
+        return list(self._events)
+
     def event_count(self) -> int:
         return len(self._events)
 
     def record_delivery_event(self, position_id: str, job_id: str, payload: dict) -> None:
-        self._record_event(
+        event = self._record_event(
             "delivery.compute_run_completed",
             "position",
             position_id,
             {"job_id": job_id, **payload},
         )
+        self._append_judge_chain_block_for_delivery(event)
+        self._persist_state()
+
+    def _append_judge_chain_block_for_delivery(
+        self,
+        delivery_event: PlatformEvent,
+        *,
+        delivery_idx: Optional[int] = None,
+    ) -> JudgeChainBlock:
+        job_id = str(delivery_event.payload.get("job_id") or delivery_event.payload.get("jobId") or "").strip()
+        if not job_id:
+            job_id = "unknown"
+        if delivery_idx is None:
+            delivery_idx = max(0, len(self._events) - 1)
+        start_idx = max(0, int(self._judge_chain_job_cursors.get(job_id, 0)))
+
+        def _job_by_settlement(sid: str) -> Optional[str]:
+            row = self.get_settlement_run(sid)
+            return row.job_id if row else None
+
+        related_ops = extract_related_ops(
+            self._events[start_idx:delivery_idx],
+            job_id=job_id,
+            job_by_settlement=_job_by_settlement,
+        )
+        prev_hash = self._judge_chain_blocks[-1].block_hash if self._judge_chain_blocks else None
+        block = build_chain_block_for_delivery(
+            delivery_event,
+            related_ops=related_ops,
+            block_index=len(self._judge_chain_blocks) + 1,
+            prev_block_hash=prev_hash,
+        )
+        self._judge_chain_blocks.append(block)
+        self._judge_chain_job_cursors[job_id] = delivery_idx
+        return block
+
+    def ensure_judge_chain_backfilled(self) -> None:
+        """Backfill chain blocks from historical delivery events if they predate chain persistence."""
+        if self._judge_chain_blocks:
+            return
+        if not self._events:
+            return
+        self._judge_chain_job_cursors = {}
+        for idx, event in enumerate(self._events):
+            if event.event_type != "delivery.compute_run_completed":
+                continue
+            self._append_judge_chain_block_for_delivery(event, delivery_idx=idx)
+        if self._judge_chain_blocks:
+            self._persist_state()
+
+    def list_judge_chain_blocks(self, limit: Optional[int] = None) -> List[JudgeChainBlock]:
+        self.ensure_judge_chain_backfilled()
+        if limit is not None and limit > 0:
+            return list(self._judge_chain_blocks[-limit:])
+        return list(self._judge_chain_blocks)
 
     def record_qc_submission(self, kind: str, job_id: str, payload: dict) -> PlatformEvent:
         return self._record_event(
@@ -853,6 +949,7 @@ class JobStorage:
             if spread is not None and spread < 0:
                 spread = 0.0
             active_order_count = sum(r.active_order_count for r in group)
+            book_depth_ngh = sum(r.book_depth_ngh for r in group)
             weighted = sum(
                 r.last_price_per_ngh * r.traded_volume_ngh_5m
                 for r in group
@@ -878,12 +975,13 @@ class JobStorage:
                     best_ask_per_ngh=best_ask,
                     spread_per_ngh=spread,
                     traded_volume_ngh_5m=float(total_vol),
+                    book_depth_ngh=float(book_depth_ngh),
                     active_order_count=active_order_count,
                 )
             )
         return merged
 
-    def list_live_market_overview(self) -> MarketLiveOverviewResponse:
+    def list_live_market_overview(self, *, group_by: str = "gpu_model") -> MarketLiveOverviewResponse:
         keys: Dict[str, ProductKey] = {}
         for order in self._orders.values():
             keys[order.product_key.as_storage_key()] = order.product_key
@@ -898,6 +996,15 @@ class JobStorage:
             )
             keys[key.as_storage_key()] = key
 
+        # Ensure every simulator GPU template appears (simulated buyers/sellers form prices here).
+        try:
+            from app.services.market_simulator import market_simulator
+
+            for _, pk in market_simulator.product_catalog():
+                keys.setdefault(pk.as_storage_key(), pk)
+        except Exception:
+            pass
+
         storage_key_set = set(keys.keys())
         trades_by_key = self._recent_trades_by_storage_key(storage_key_set)
         active_by_key = self._active_exchange_orders_by_storage_key(storage_key_set)
@@ -910,6 +1017,7 @@ class JobStorage:
             book = self._orderbook_from_active_orders(product_key, active)
             trades = trades_by_key.get(k, [])
             active_order_count = len(active)
+            book_depth_ngh = sum(o.remaining_ngh for o in active if o.remaining_ngh > 0)
             recent_trades = [
                 trade
                 for trade in trades
@@ -917,15 +1025,17 @@ class JobStorage:
                 <= 300
             ]
             volume_5m = sum(trade.quantity_ngh for trade in recent_trades)
-            last_price = (
-                trades[0].price_per_ngh
-                if trades
-                else (
-                    ((book.best_bid or 0.0) + (book.best_ask or 0.0)) / 2.0
-                    if (book.best_bid is not None and book.best_ask is not None)
-                    else (book.best_bid or book.best_ask or 0.0)
-                )
-            )
+            # Prefer a live two-sided mid so prices move with resting liquidity, not only on prints.
+            if book.best_bid is not None and book.best_ask is not None:
+                last_price = (book.best_bid + book.best_ask) / 2.0
+            elif trades:
+                last_price = trades[0].price_per_ngh
+            elif book.best_bid is not None:
+                last_price = book.best_bid
+            elif book.best_ask is not None:
+                last_price = book.best_ask
+            else:
+                last_price = 0.0
             rows.append(
                 MarketLiveOverviewRow(
                     gpu_model=self._infer_gpu_model_for_key(product_key),
@@ -935,13 +1045,17 @@ class JobStorage:
                     best_ask_per_ngh=book.best_ask,
                     spread_per_ngh=book.spread,
                     traded_volume_ngh_5m=float(volume_5m),
+                    book_depth_ngh=float(book_depth_ngh),
                     active_order_count=active_order_count,
                 )
             )
-        merged_rows = self._merge_live_overview_by_gpu_model(rows)
+        if group_by == "product_key":
+            out_rows = rows
+        else:
+            out_rows = self._merge_live_overview_by_gpu_model(rows)
         return MarketLiveOverviewResponse(
             as_of=datetime.utcnow().isoformat() + "Z",
-            rows=merged_rows,
+            rows=out_rows,
         )
 
     def _get_owner_hierarchy_dict(self, owner_id: Optional[str]) -> Dict[str, str]:
@@ -2036,6 +2150,9 @@ class JobStorage:
         """Create a new physically deliverable demo position."""
         self._assert_trading_enabled(owner_id)
         position_id = str(uuid.uuid4())
+        created_dt = datetime.now(timezone.utc)
+        horizon_sec = int(request.close_in_seconds)
+        closes_dt = created_dt + timedelta(seconds=horizon_sec)
         position = MarketPositionResponse(
             position_id=position_id,
             product_key=request.product_key,
@@ -2044,7 +2161,9 @@ class JobStorage:
             price_per_ngh=request.price_per_ngh,
             notional=request.quantity_ngh * request.price_per_ngh,
             status=MarketPositionStatus.OPEN,
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=_utc_iso_millis_z(created_dt),
+            closes_at=_utc_iso_millis_z(closes_dt),
+            close_in_seconds=horizon_sec,
             owner_id=owner_id,
         )
         self._positions[position_id] = position
@@ -2057,22 +2176,28 @@ class JobStorage:
                 "side": request.side.value,
                 "quantity_ngh": request.quantity_ngh,
                 "price_per_ngh": request.price_per_ngh,
+                "close_in_seconds": int(request.close_in_seconds),
+                "closes_at": position.closes_at,
                 "owner_id": owner_id,
             },
         )
-        return position
+        from app.services.position_contract import annotate_market_position_countdown
+
+        return annotate_market_position_countdown(position)
 
     def list_market_positions(
         self, owner_id: Optional[str] = None, *, limit: Optional[int] = None
     ) -> List[MarketPositionResponse]:
         """List positions, newest first, optionally filtered by owner."""
+        from app.services.position_contract import annotate_market_position_countdown
+
         positions = list(self._positions.values())
         if owner_id is not None:
             positions = [p for p in positions if p.owner_id == owner_id]
         positions.sort(key=lambda p: p.created_at, reverse=True)
         if limit is not None and limit > 0:
             positions = positions[:limit]
-        return positions
+        return [annotate_market_position_countdown(p) for p in positions]
 
     def settle_market_position(self, position_id: str) -> Optional[MarketPositionResponse]:
         """Settle a market position into voucher balance."""
@@ -2082,8 +2207,12 @@ class JobStorage:
         if position.status == MarketPositionStatus.SETTLED:
             return position
 
+        from app.services.position_contract import assert_contract_closed_for_settlement
+
+        assert_contract_closed_for_settlement(position)
+
         position.status = MarketPositionStatus.SETTLED
-        position.settled_at = datetime.utcnow().isoformat() + "Z"
+        position.settled_at = _utc_iso_millis_z(datetime.now(timezone.utc))
         key = position.product_key.as_storage_key()
         if position.side.value == "buy":
             self._vouchers[key] = self.get_voucher_balance(key) + position.quantity_ngh
@@ -2099,7 +2228,9 @@ class JobStorage:
                 "voucher_balance_ngh": self._vouchers[key],
             },
         )
-        return position
+        from app.services.position_contract import annotate_market_position_countdown
+
+        return annotate_market_position_countdown(position)
 
     # ---- exchange ----
     def list_exchange_orders(
@@ -2281,6 +2412,37 @@ class JobStorage:
         )
         self._persist_state()
         return order
+
+    def prune_synthetic_open_orders_for_key(self, product_key: ProductKey, *, keep: int = 200) -> int:
+        """Trim oldest sim-agent resting orders for a venue so the demo book stays bounded."""
+        if keep < 4:
+            return 0
+        key = product_key.as_storage_key()
+        open_rows = [
+            o
+            for o in self._orders.values()
+            if o.product_key.as_storage_key() == key
+            and o.status in (ExchangeOrderStatus.OPEN, ExchangeOrderStatus.PARTIALLY_FILLED)
+            and o.remaining_ngh > 0
+            and self.is_synthetic_owner(o.owner_id)
+        ]
+        if len(open_rows) <= keep:
+            return 0
+        open_rows.sort(key=lambda r: r.created_at)
+        dropped = 0
+        for o in open_rows[: len(open_rows) - keep]:
+            o.status = ExchangeOrderStatus.CANCELLED
+            o.remaining_ngh = 0.0
+            dropped += 1
+            self._record_event(
+                "exchange.order_cancelled",
+                "exchange_order",
+                o.order_id,
+                {"owner_id": o.owner_id, "reason": "synthetic_book_prune"},
+            )
+        if dropped:
+            self._persist_state()
+        return dropped
 
     def get_exchange_orderbook(self, product_key: ProductKey) -> ExchangeOrderBookResponse:
         key = product_key.as_storage_key()
